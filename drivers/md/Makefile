@@ -64,8 +64,8 @@ obj-$(CONFIG_DM_VERITY)		+= dm-verity.o
 obj-$(CONFIG_DM_CACHE)		+= dm-cache.o
 obj-$(CONFIG_DM_CACHE_SMQ)	+= dm-cache-smq.o
 
-# WHT added: support lru cache policy for dm-cache
-#obj-$(CONFIG_DM_CACHE_LRU)	+= dm-cache-lru.o
+#WHT added: support lru cache policy for dm-cache
+obj-$(CONFIG_DM_CACHE_LRU)	+= dm-cache-lru.o
 
 obj-$(CONFIG_DM_ERA)		+= dm-era.o
 obj-$(CONFIG_DM_LOG_WRITES)	+= dm-log-writes.o
