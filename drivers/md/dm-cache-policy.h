@@ -96,6 +96,28 @@ struct dm_cache_policy {
 			    dm_cblock_t cblock, bool dirty,
 			    uint32_t hint, bool hint_valid);
 
+#ifdef CONFIG_DM_MULTI_USER 
+	/* use logical cache block number to invalidate */
+	/*
+	 * Drops the mapping, irrespective of whether it's clean or dirty.
+	 * Returns -ENODATA if cblock is not mapped.
+	 */
+	int (*invalidate_mapping)(struct dm_cache_policy *p, dm_cbn_t cblock);
+	/*
+	 * Gets the hint for a given cblock.  Called in a single threaded
+	 * context.  So no locking required.
+	 */
+	uint32_t (*get_hint)(struct dm_cache_policy *p, dm_cbn_t cblock);
+	/*
+	 * How full is the cache?
+	 */
+	dm_cbn_t (*residency)(struct dm_cache_policy *p);
+
+    /*
+	 * WHT added: get the number of cache block
+	 */
+    dm_cbn_t (*get_nrblock)(struct dm_cache_policy *p);
+#else
 	/*
 	 * Drops the mapping, irrespective of whether it's clean or dirty.
 	 * Returns -ENODATA if cblock is not mapped.
@@ -112,6 +134,7 @@ struct dm_cache_policy {
 	 * How full is the cache?
 	 */
 	dm_cblock_t (*residency)(struct dm_cache_policy *p);
+#endif
 
 	/*
 	 * Because of where we sit in the block layer, we can be asked to
@@ -173,9 +196,17 @@ struct dm_cache_policy_type {
 	size_t hint_size;
 
 	struct module *owner;
+#ifdef CONFIG_DM_MULTI_USER 
+    /* add hot/cold cache size parameters to create function */
+	struct dm_cache_policy *(*create)(dm_cbn_t hot_cache_size,
+			          dm_cbn_t cold_cache_size,
+					  sector_t origin_size,
+					  sector_t block_size);
+#else
 	struct dm_cache_policy *(*create)(dm_cblock_t cache_size,
 					  sector_t origin_size,
 					  sector_t block_size);
+#endif
 };
 
 int dm_cache_policy_register(struct dm_cache_policy_type *type);

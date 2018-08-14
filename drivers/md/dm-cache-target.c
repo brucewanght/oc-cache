@@ -21,6 +21,11 @@
 
 #define DM_MSG_PREFIX "cache"
 
+#ifdef CONFIG_DM_MULTI_USER
+/* OC-Cache: set max user number to 16, the same as ocssd channels */
+#define NUM_CHANNELS (16)
+#endif
+
 DECLARE_DM_KCOPYD_THROTTLE_WITH_MODULE_PARM(cache_copy_throttle,
 	"A percentage of time allocated for copying to and/or from cache");
 
@@ -392,20 +397,59 @@ struct cache {
 	struct dm_dev *origin_dev;
 
 	/*
-	 * The faster of the two data devices.  Typically an SSD.
-	 */
-	struct dm_dev *cache_dev;
-
-	/*
 	 * Size of the origin device in _complete_ blocks and native sectors.
 	 */
 	dm_oblock_t origin_blocks;
 	sector_t origin_sectors;
 
+#ifdef CONFIG_DM_MULTI_USER 
+	/*
+	 * Size of the cache device in blocks.
+	 */
+	dm_cbn_t cache_size;
+	uint16_t user_id;                  /* user id */
+	uint16_t cold_id;                  /* cold cache device channel id */
+	uint16_t hot_id;                   /* hot cache device channel id */
+	char cdev_name[NUM_CHANNELS][64];  /* names of cache devices */
+	dm_cbn_t dev_size[NUM_CHANNELS];   /* sizes of cache devices */
+
+	/*
+	 * We use 2 cache devices to accomodate cache.
+	 * One is hot cache device for hot cache data, and another is cold cache device
+	 * for cold cache data.
+	 */
+	struct dm_dev *hot_cache_dev;      /* hot cache device */
+	struct dm_dev *cold_cache_dev;     /* cold cache device */
+
+	dm_cbn_t cold_cache_off;        /* user cache offset on cold cache device */
+	dm_cbn_t cold_cache_size;       /* user cache size on cold cache device */
+	dm_cbn_t hot_cache_off;         /* user cache offset on hot cache device */
+	dm_cbn_t hot_cache_size;        /* user cache size on hot cache device */
+	dm_cbn_t user_cache_size;       /* user cache size overall, i.e., cold+hot */
+	dm_cbn_t hot_dev_size;          /* hot cache device size in block */
+	dm_cbn_t cold_dev_size;         /* cold cache device size in block */
+
+	uint64_t cold_dirty_off;        /* user offset on in the dirty bitset */
+	uint64_t hot_dirty_off;         /* user offset on in the dirty bitset */
+#else
 	/*
 	 * Size of the cache device in blocks.
 	 */
 	dm_cblock_t cache_size;
+
+	/*
+	 * The faster of the two data devices.  Typically an SSD.
+	 */
+	struct dm_dev *cache_dev;
+#endif
+
+	/* OC-Cache: for current user */
+	uint16_t user_id;
+	uint16_t nr_users;
+	/* user offset in cache_dirty_bitset */
+	uint64_t user_dirty_off;
+	/* number of cache blocks belong to user */
+	dm_cblock_t user_cache_size;
 
 	/*
 	 * Invalidation fields.
@@ -688,12 +732,18 @@ static bool bio_detain_shared(struct cache *cache, dm_oblock_t oblock, struct bi
 }
 
 /*----------------------------------------------------------------*/
-
+#ifdef CONFIG_DM_MULTI_USER 
+/* use dm_cbn_t as size type */
+static bool is_dirty(struct cache *cache, dm_cbn_t b)
+{
+	return test_bit(from_cbn(b), cache->dirty_bitset);
+}
+#else
 static bool is_dirty(struct cache *cache, dm_cblock_t b)
 {
 	return test_bit(from_cblock(b), cache->dirty_bitset);
 }
-
+#endif
 static void set_dirty(struct cache *cache, dm_cblock_t cblock)
 {
 	if (!test_and_set_bit(from_cblock(cblock), cache->dirty_bitset)) {
@@ -819,7 +869,30 @@ static void remap_to_cache(struct cache *cache, struct bio *bio,
 	sector_t bi_sector = bio->bi_iter.bi_sector;
 	sector_t block = from_cblock(cblock);
 
+#ifdef CONFIG_DM_MULTI_USER 
+	sector_t block = from_cbn(cblock.dbn);
+	/* 
+	 * we need remap to hot or cold cache according information from policy, i.e., cblock.
+	 */
+	if (cblock.hot)
+	{
+		/* this block belong to hot cache, we need to shift block to user hot cache
+		 * device range according the offeset */
+		bio_set_dev(bio, cache->hot_cache_dev->bdev);
+		block = block + cache->hot_cache_off;
+	}
+	else 
+	{
+		/* this block belong to cold cache, we need to shift block to user cold cache
+		 * device range according the offeset */
+		bio_set_dev(bio, cache->cold_cache_dev->bdev);
+		block = block + cache->cold_cache_off;
+	}
+#else
+	sector_t block = from_cblock(cblock);
 	bio_set_dev(bio, cache->cache_dev->bdev);
+#endif
+
 	if (!block_size_is_power_of_two(cache))
 		bio->bi_iter.bi_sector =
 			(block * cache->sectors_per_block) +
@@ -1193,14 +1266,39 @@ static int copy(struct dm_cache_migration *mg, bool promote)
 	int r;
 	struct dm_io_region o_region, c_region;
 	struct cache *cache = mg->cache;
-
-	o_region.bdev = cache->origin_dev->bdev;
-	o_region.sector = from_oblock(mg->op->oblock) * cache->sectors_per_block;
-	o_region.count = cache->sectors_per_block;
-
+#ifdef CONFIG_DM_MULTI_USER 
+	/* set cache block according user offset.
+	 * copy function is used to copy between origin and cache device,
+	 * so the cblock must be the physical cblock on cache device, so
+	 * we use cblock.dbn to set copy region and we also need to shift
+	 * according to user offset.
+	 */
+	dm_cbn_t block = 0;
+	if (mg->op->cblock.hot)
+	{
+		/* set block in the hot cache device according to hot cache offset */
+		c_region.bdev = cache->hot_cache_dev->bdev;
+		block = from_cbn(mg->op->cblock.dbn) + to_cbn(cache->hot_cache_off);
+	}
+	else 
+	{
+		/* set block in the cold cache device according to cold cache offset */
+		c_region.bdev = cache->cold_cache_dev->bdev;
+		block = from_cbn(mg->op->cblock.dbn) + to_cbn(cache->cold_cache_off);
+	}
+	c_region.sector = from_cbn(block) * cache->sectors_per_block;
+	c_region.count = cache->sectors_per_block;
+#else
+    /* set cache region */
 	c_region.bdev = cache->cache_dev->bdev;
 	c_region.sector = from_cblock(mg->op->cblock) * cache->sectors_per_block;
 	c_region.count = cache->sectors_per_block;
+#endif
+
+    /* set origin region */
+	o_region.bdev = cache->origin_dev->bdev;
+	o_region.sector = from_oblock(mg->op->oblock) * cache->sectors_per_block;
+	o_region.count = cache->sectors_per_block;
 
 	if (promote)
 		r = dm_kcopyd_copy(cache->copier, &o_region, 1, &c_region, 0, copy_complete, &mg->k);
@@ -1341,7 +1439,12 @@ static void mg_update_metadata(struct work_struct *ws)
 
 	switch (op->op) {
 	case POLICY_PROMOTE:
+#ifdef CONFIG_DM_MULTI_USER 
+		/* we need to use logical cache block number here */
+		r = dm_cache_insert_mapping(cache->cmd, op->cblock.cbn, op->oblock);
+#else
 		r = dm_cache_insert_mapping(cache->cmd, op->cblock, op->oblock);
+#endif
 		if (r) {
 			DMERR_LIMIT("%s: migration failed; couldn't insert mapping",
 				    cache_device_name(cache));
@@ -1354,7 +1457,12 @@ static void mg_update_metadata(struct work_struct *ws)
 		break;
 
 	case POLICY_DEMOTE:
+#ifdef CONFIG_DM_MULTI_USER 
+		/* we need to use logical cache block number here */
+		r = dm_cache_remove_mapping(cache->cmd, op->cblock.cbn);
+#else
 		r = dm_cache_remove_mapping(cache->cmd, op->cblock);
+#endif
 		if (r) {
 			DMERR_LIMIT("%s: migration failed; couldn't update on disk metadata",
 				    cache_device_name(cache));
@@ -1585,7 +1693,12 @@ static void invalidate_completed(struct work_struct *ws)
 	invalidate_complete(mg, !mg->k.input);
 }
 
+#ifdef CONFIG_DM_MULTI_USER 
+/* use logical cache block here, i.e., dm_cbn_t */
+static int invalidate_cblock(struct cache *cache, dm_cbn_t cblock)
+#else
 static int invalidate_cblock(struct cache *cache, dm_cblock_t cblock)
+#endif
 {
 	int r = policy_invalidate_mapping(cache->policy, cblock);
 	if (!r) {
@@ -1614,7 +1727,12 @@ static void invalidate_remove(struct work_struct *ws)
 	struct dm_cache_migration *mg = ws_to_mg(ws);
 	struct cache *cache = mg->cache;
 
+#ifdef CONFIG_DM_MULTI_USER  
+	/* invalidate cache block through logical number */
+	r = invalidate_cblock(cache, mg->invalidate_cblock.cbn);
+#else
 	r = invalidate_cblock(cache, mg->invalidate_cblock);
+#endif
 	if (r) {
 		invalidate_complete(mg, false);
 		return;
@@ -1812,11 +1930,21 @@ static int map_bio(struct cache *cache, struct bio *bio, dm_oblock_t block,
 			} else
 				remap_to_origin_clear_discard(cache, bio, block);
 		} else {
+#ifdef CONFIG_DM_MULTI_USER
+			/* we should use logical cache block number to test dirty */
+			if (bio_data_dir(bio) == WRITE && writethrough_mode(&cache->features) &&
+			    !is_dirty(cache, cblock.cbn)) {
+				remap_to_origin_then_cache(cache, bio, block, cblock);
+				accounted_begin(cache, bio);
+			} 
+#else
 			if (bio_data_dir(bio) == WRITE && writethrough_mode(cache) &&
 			    !is_dirty(cache, cblock)) {
 				remap_to_origin_and_cache(cache, bio, block, cblock);
 				accounted_begin(cache, bio);
-			} else
+			}
+#endif 
+            else
 				remap_to_cache_dirty(cache, bio, block, cblock);
 		}
 	}
@@ -1884,11 +2012,18 @@ static blk_status_t commit_op(void *context)
 static bool process_flush_bio(struct cache *cache, struct bio *bio)
 {
 	struct per_bio_data *pb = get_per_bio_data(bio);
-
+#ifdef CONFIG_DM_MULTI_USER 
+	/* we need to pass a dm_cblock_t struct to remap_to_cache */
+	if (!pb->req_nr)
+		remap_to_origin(cache, bio);
+	else
+		remap_to_cache(cache, bio, to_cblock(0,0,false));
+#else
 	if (!pb->req_nr)
 		remap_to_origin(cache, bio);
 	else
 		remap_to_cache(cache, bio, 0);
+#endif
 
 	issue_after_commit(&cache->committer, bio);
 	return true;
@@ -2058,7 +2193,13 @@ static void destroy(struct cache *cache)
 static void cache_dtr(struct dm_target *ti)
 {
 	struct cache *cache = ti->private;
-
+#ifdef CONFIG_DM_MULTI_USER 
+    /* output cache information */
+	DMWARN("destroy: sectors per block = %lu, cache blocks = %u, user id = %u, hot cache id = %u, cold cache id = %u, hot range = [%u, %u), cold range = [%u, %u)",
+			cache->sectors_per_block, cache->cache_size, cache->user_id, cache->hot_id, cache->cold_id,
+			cache->hot_cache_off, cache->hot_cache_off + cache->hot_cache_size,
+			cache->cold_cache_off, cache->cold_cache_off + cache->cold_cache_size);
+#endif
 	destroy(cache);
 }
 
@@ -2100,21 +2241,31 @@ static sector_t get_dev_size(struct dm_dev *dev)
  */
 struct cache_args {
 	struct dm_target *ti;
-
 	struct dm_dev *metadata_dev;
-
-	struct dm_dev *cache_dev;
-	sector_t cache_sectors;
-
 	struct dm_dev *origin_dev;
 	sector_t origin_sectors;
-
+	sector_t cache_sectors;
 	uint32_t block_size;
-
+#ifdef CONFIG_DM_MULTI_USER 
+	/* record cache devices user holds, will pass to cache struct */
+	dm_cbn_t dev_size[NUM_CHANNELS];/* record size of cache devices */
+	struct cache cache[NUM_CHANNELS];  /* cache structs are used to manage SSD cache */
+	char cdev_name[NUM_CHANNELS][64];  /* record cache devices name */
+	uint16_t cold_id;                  /* channel id, user-specified */
+	uint16_t hot_id;                   /* hot cache channel id, user-specified */
+	uint16_t user_id;                  /* user id, user-specified */
+	dm_cbn_t cold_cache_off;           /* user cache offset on cold cache device */
+	dm_cbn_t cold_cache_size;          /* user cache size on cold cache device */
+	dm_cbn_t hot_cache_off;            /* user cache offset on hot cache device */
+	dm_cbn_t hot_cache_size;           /* user cache size on hot cache device */
+	struct dm_dev *hot_cache_dev;      /* hot cache device */
+	struct dm_dev *cold_cache_dev;     /* cold cache device */
+#else 
+	struct dm_dev *cache_dev;
+#endif
 	const char *policy_name;
 	int policy_argc;
 	const char **policy_argv;
-
 	struct cache_features features;
 };
 
@@ -2123,8 +2274,22 @@ static void destroy_cache_args(struct cache_args *ca)
 	if (ca->metadata_dev)
 		dm_put_device(ca->ti, ca->metadata_dev);
 
+#ifdef CONFIG_DM_MULTI_USER 
+    /* remove devices cache_args holds */
+	if (ca->hot_cache_dev)
+	{
+		dm_put_device(ca->ti, ca->hot_cache_dev);
+		DMWARN("release ca->hot_cache_dev...OK");
+	}
+	if (ca->cold_cache_dev)
+	{
+		dm_put_device(ca->ti, ca->cold_cache_dev);
+		DMWARN("release ca->cold_cache_dev...OK");
+	}
+#else
 	if (ca->cache_dev)
 		dm_put_device(ca->ti, ca->cache_dev);
+#endif
 
 	if (ca->origin_dev)
 		dm_put_device(ca->ti, ca->origin_dev);
@@ -2141,6 +2306,171 @@ static bool at_least_one_arg(struct dm_arg_set *as, char **error)
 
 	return true;
 }
+
+#ifdef CONFIG_DM_MULTI_USER 
+/*
+ * WHT added: parse the user id from arguments to set the target
+ */
+static int parse_user_id(struct cache_args *ca, struct dm_arg_set *as, 
+		char **err)
+{
+    uint16_t user_id;
+    if (kstrtou16(dm_shift_arg(as), 10, &user_id))
+    {
+        *err = "invalid user id, must be an integer";
+        return -EINVAL;
+    }
+
+    ca->user_id = user_id;
+
+    return 0;
+}
+
+/*
+ * WHT added: parse the hot cache channel id from arguments to set the target
+ */
+static int parse_hot_cache_id(struct cache_args *ca, struct dm_arg_set *as, 
+		char **err)
+{
+    uint16_t hot_id;
+    if (kstrtou16(dm_shift_arg(as), 10, &hot_id) || (hot_id > NUM_CHANNELS))
+    {
+        *err = "invalid hot channel id, must be in range [0,15]";
+        return -EINVAL;
+    }
+
+    ca->hot_id = hot_id;
+
+    return 0;
+}
+
+/*
+ * WHT added: parse the channel id from arguments to set the target
+ */
+static int parse_cold_cache_id(struct cache_args *ca, struct dm_arg_set *as, 
+		char **err)
+{
+    uint16_t cold_id;
+    if (kstrtou16(dm_shift_arg(as), 10, &cold_id) || (cold_id > NUM_CHANNELS))
+    {
+        *err = "invalid cold channel id, must be in range [0,15]";
+        return -EINVAL;
+    }
+
+    ca->cold_id = cold_id;
+
+    return 0;
+}
+
+/*
+ * WHT added: parse the user hot cahce offset from arguments to set the target
+ */
+static int parse_hot_cache_off(struct cache_args *ca, struct dm_arg_set *as, 
+		char **err)
+{
+    uint64_t hot_cache_off;
+    if (kstrtou64(dm_shift_arg(as), 10, &hot_cache_off))
+    {
+        *err = "invalid hot cache offset, must be positive integer";
+        return -EINVAL;
+    }
+
+	if(hot_cache_off >= ca->dev_size[ca->hot_id])
+	{
+		*err = "invalid hot cache offset, bigger than chanel size";
+        return -EINVAL;
+	}
+
+    ca->hot_cache_off = hot_cache_off;
+
+    return 0;
+}
+
+/*
+ * WHT added: parse the user hot size from arguments to set the target
+ */
+static int parse_hot_cache_size(struct cache_args *ca, struct dm_arg_set *as, 
+		char **err)
+{
+    uint64_t hot_cache_size;
+    if (kstrtou64(dm_shift_arg(as), 10, &hot_cache_size))
+    {
+        *err = "invalid hot cache size, must be positive integer";
+        return -EINVAL;
+    }
+
+	if (ca->hot_cache_off + hot_cache_size > ca->dev_size[ca->hot_id])
+	{
+		*err = "invalid hot cache size, offset+size bigger than hot chanel size";
+        return -EINVAL;
+	}
+
+    ca->hot_cache_size = hot_cache_size;
+
+    return 0;
+}
+
+/*
+ * WHT added: parse the user cahce offset from arguments to set the target
+ */
+static int parse_cold_cache_off(struct cache_args *ca, struct dm_arg_set *as, 
+		char **err)
+{
+    uint64_t cold_cache_off;
+    if (kstrtou64(dm_shift_arg(as), 10, &cold_cache_off))
+    {
+        *err = "invalid cold cache offset, must be positive integer";
+        return -EINVAL;
+    }
+
+	if (ca->cold_id == ca->hot_id)
+	{
+		/*
+		 * if hot cache is in the same channel with normal cache,
+		 * then the offset must not overlap each other
+		 */
+		if(cold_cache_off < ca->hot_cache_off + ca->hot_cache_size)
+		{
+			*err = "invalid cold cache offset, overlap with hot cache";
+			return -EINVAL;
+		}
+	}
+
+	if(cold_cache_off >= ca->dev_size[ca->cold_id])
+	{
+		*err = "invalid cold cache offset, bigger than chanel size";
+        return -EINVAL;
+	}
+
+    ca->cold_cache_off = cold_cache_off;
+
+    return 0;
+}
+
+/*
+ * WHT added: parse the user cahce size from arguments to set the target
+ */
+static int parse_cold_cache_size(struct cache_args *ca, struct dm_arg_set *as, 
+		char **err)
+{
+    uint64_t cold_cache_size;
+    if (kstrtou64(dm_shift_arg(as), 10, &cold_cache_size))
+    {
+        *err = "invalid cold cache size, must be positive integer";
+        return -EINVAL;
+    }
+
+	if (ca->cold_cache_off + cold_cache_size > ca->dev_size[ca->cold_id])
+	{
+		*err = "invalid cold cache size, offset+size bigger than chanel size";
+        return -EINVAL;
+	}
+
+    ca->cold_cache_size = cold_cache_size;
+
+    return 0;
+}
+#endif
 
 static int parse_metadata_dev(struct cache_args *ca, struct dm_arg_set *as,
 			      char **error)
@@ -2172,6 +2502,44 @@ static int parse_cache_dev(struct cache_args *ca, struct dm_arg_set *as,
 {
 	int r;
 
+#ifdef CONFIG_DM_MULTI_USER 
+	/* get the cache device according user channel id */
+	uint16_t i = 0;
+	uint16_t cid = ca->cold_id;
+	uint16_t hid = ca->hot_id;
+	const char *dev = NULL;
+
+	if (!at_least_one_arg(as, error))
+		return -EINVAL;
+
+	/* get the cache device base name, e.g., cachedev */
+	dev = dm_shift_arg(as);
+	/* get the device name, e.g., cachedev0, cachedev1... */
+	for(i=0; i<NUM_CHANNELS; i++)
+	{
+		sprintf(ca->cdev_name[i], "%s%u", dev, i);
+	}
+	/* load hot cache device into dm-cache */
+    r = dm_get_device(ca->ti, ca->cdev_name[hid], FMODE_READ | FMODE_WRITE, &ca->cache[hid].hot_cache_dev);
+    if (r) {
+    	*error = "Error opening hot cache device";
+    	return r;
+    }
+	/* load cold cache device into dm-cache */
+    r = dm_get_device(ca->ti, ca->cdev_name[cid], FMODE_READ | FMODE_WRITE, &ca->cache[cid].cold_cache_dev);
+    if (r) {
+    	*error = "Error opening cold cache device";
+    	return r;
+    }
+	/* get the device size */
+	ca->dev_size[hid] = get_dev_size(ca->cache[hid].hot_cache_dev);
+	ca->dev_size[cid] = get_dev_size(ca->cache[cid].cold_cache_dev);
+	/* set hot cache device and cold cache device */
+	ca->hot_cache_dev = ca->cache[hid].hot_cache_dev;
+	ca->cold_cache_dev = ca->cache[cid].cold_cache_dev;
+	/* set cache cache size in sectors */
+	ca->cache_sectors = ca->dev_size[cid] + ca->dev_size[hid];
+#else 
 	if (!at_least_one_arg(as, error))
 		return -EINVAL;
 
@@ -2182,6 +2550,7 @@ static int parse_cache_dev(struct cache_args *ca, struct dm_arg_set *as,
 		return r;
 	}
 	ca->cache_sectors = get_dev_size(ca->cache_dev);
+#endif
 
 	return 0;
 }
@@ -2240,7 +2609,12 @@ static void init_features(struct cache_features *cf)
 {
 	cf->mode = CM_WRITE;
 	cf->io_mode = CM_IO_WRITEBACK;
+#ifdef CONFIG_DM_MULTI_USER 
+	/* set the default metadata_version to 2 */ 
+	cf->metadata_version = 2;
+#else
 	cf->metadata_version = 1;
+#endif
 }
 
 static int parse_features(struct cache_args *ca, struct dm_arg_set *as,
@@ -2276,6 +2650,11 @@ static int parse_features(struct cache_args *ca, struct dm_arg_set *as,
 		else if (!strcasecmp(arg, "metadata2"))
 			cf->metadata_version = 2;
 
+#ifdef CONFIG_DM_MULTI_USER 
+		/* add config for metadata version 1 */
+		else if (!strcasecmp(arg, "metadata1"))
+			cf->metadata_version = 1;
+#endif
 		else {
 			*error = "Unrecognised cache feature requested";
 			return -EINVAL;
@@ -2318,6 +2697,28 @@ static int parse_cache_args(struct cache_args *ca, int argc, char **argv,
 	as.argc = argc;
 	as.argv = argv;
 
+#ifdef CONFIG_DM_MULTI_USER 
+	/* change arguments order.
+	 * user_id hot_id cold_id meta_dev cache_dev origin_dev block_size 
+	 * hot_offset hot_size cold_offset cold_size policy
+	 */
+	/* parse user_id, need to be a int between 0 to 15 */
+	r = parse_user_id(ca, &as, error);
+	if (r)
+		return r;
+
+	/* Parse channel id for hot cache, valid value is 0 to 15 */
+	r = parse_hot_cache_id(ca, &as, error);
+	if (r)
+		return r;
+
+	/* parse channel id, valid value is 0 to 15,
+	 * can be the same as cold_id, but the offset must not overlap
+	 */
+	r = parse_cold_cache_id(ca, &as, error);
+	if (r)
+		return r;
+
 	r = parse_metadata_dev(ca, &as, error);
 	if (r)
 		return r;
@@ -2333,6 +2734,43 @@ static int parse_cache_args(struct cache_args *ca, int argc, char **argv,
 	r = parse_block_size(ca, &as, error);
 	if (r)
 		return r;
+
+	/* parse offset of user hot cache on hot cache device in sectors(512B) */
+	r = parse_hot_cache_off(ca, &as, error);
+	if (r)
+		return r;
+
+	/* parse size of user hot cache on hot cache device in sectors(512B) */
+	r = parse_hot_cache_size(ca, &as, error);
+	if (r)
+		return r;
+
+	/* parse cold_cache_off in sectors(512B) */
+	r = parse_cold_cache_off(ca, &as, error);
+	if (r)
+		return r;
+
+	/* parse cold_cache_size in sectors(512B) */
+	r = parse_cold_cache_size(ca, &as, error);
+	if (r)
+		return r;
+#else
+	r = parse_metadata_dev(ca, &as, error);
+	if (r)
+		return r;
+
+	r = parse_cache_dev(ca, &as, error);
+	if (r)
+		return r;
+
+	r = parse_origin_dev(ca, &as, error);
+	if (r)
+		return r;
+
+	r = parse_block_size(ca, &as, error);
+	if (r)
+		return r;
+#endif
 
 	r = parse_features(ca, &as, error);
 	if (r)
@@ -2403,10 +2841,21 @@ static int set_config_values(struct cache *cache, int argc, const char **argv)
 static int create_cache_policy(struct cache *cache, struct cache_args *ca,
 			       char **error)
 {
+#ifdef CONFIG_DM_MULTI_USER 
+    /* set number of policy cache entry to user cache size,
+	 * because the cache may be shared by multiple users.
+	 */
+	struct dm_cache_policy *p = dm_cache_policy_create(ca->policy_name,
+							   cache->hot_cache_size,
+							   cache->cold_cache_size,
+							   cache->origin_sectors,
+							   cache->sectors_per_block);
+#else 
 	struct dm_cache_policy *p = dm_cache_policy_create(ca->policy_name,
 							   cache->cache_size,
 							   cache->origin_sectors,
 							   cache->sectors_per_block);
+#endif
 	if (IS_ERR(p)) {
 		*error = "Error creating cache's policy";
 		return PTR_ERR(p);
@@ -2443,6 +2892,61 @@ static sector_t calculate_discard_block_size(sector_t cache_block_size,
 	return discard_block_size;
 }
 
+#ifdef CONFIG_DM_MULTI_USER 
+static void set_cache_size(struct cache *cache, dm_cbn_t size)
+{
+	/* check if user cache size is too big, we need memory big enough */
+	dm_block_t nr_blocks = from_cbn(size);
+
+	if (nr_blocks > (1 << 31) && cache->cache_size != size)
+		DMWARN_LIMIT("You have created a cache device with a lot of individual cache blocks (%llu)\n"
+			     "All these mappings can consume a lot of kernel memory, and take some time to read/write.\n"
+			     "Please consider increasing the cache block size to reduce the overall cache block count.",
+			     (unsigned long long) nr_blocks);
+	cache->cache_size = size;
+}
+
+/* WHT added: set user cache size */
+static void set_user_cache_size(struct cache *cache, dm_cbn_t size, bool hot)
+{
+	dm_block_t nr_blocks = from_cbn(size);
+
+	if (hot)
+	{
+    	if (nr_blocks > (1 << 27) && cache->hot_cache_size != size)
+    		DMWARN_LIMIT("You have set a lot of individual hot cache blocks (%llu)\n"
+    			     "All these mappings can consume a lot of kernel memory, and take some time to read/write.\n"
+    			     "Please consider increasing the cache block size to reduce the overall cache block count.",
+    			     (unsigned long long) nr_blocks);
+    
+    	if(nr_blocks > cache->dev_size[cache->hot_id])
+    	{
+    		cache->hot_cache_size = cache->dev_size[cache->hot_id];
+    		DMWARN_LIMIT("Hot cache block size bigger than hot device size, force it to device size: %u",
+    				cache->hot_cache_size);
+    	}
+    	else 
+    		cache->hot_cache_size = nr_blocks;
+	}
+	else
+	{
+    	if (nr_blocks > (1 << 27) && cache->cold_cache_size != size)
+    		DMWARN_LIMIT("You have set a lot of individual cold cache blocks (%llu)\n"
+    			     "All these mappings can consume a lot of kernel memory, and take some time to read/write.\n"
+    			     "Please consider increasing the cache block size to reduce the overall cache block count.",
+    			     (unsigned long long) nr_blocks);
+    
+    	if(nr_blocks > cache->dev_size[cache->cold_id])
+    	{
+    		cache->cold_cache_size = cache->dev_size[cache->cold_id];
+    		DMWARN_LIMIT("Cold cache block size bigger than cold device size or it is zero, force it to device size: %u",
+    				cache->cold_cache_size);
+    	}
+    	else 
+    		cache->cold_cache_size = nr_blocks;
+	}
+}
+#else 
 static void set_cache_size(struct cache *cache, dm_cblock_t size)
 {
 	dm_block_t nr_blocks = from_cblock(size);
@@ -2455,6 +2959,7 @@ static void set_cache_size(struct cache *cache, dm_cblock_t size)
 
 	cache->cache_size = size;
 }
+#endif
 
 static int is_congested(struct dm_dev *dev, int bdi_bits)
 {
@@ -2466,8 +2971,15 @@ static int cache_is_congested(struct dm_target_callbacks *cb, int bdi_bits)
 {
 	struct cache *cache = container_of(cb, struct cache, callbacks);
 
+#ifdef CONFIG_DM_MULTI_USER 
+	/* we have two cache devices so we need check both of them */
+	return is_congested(cache->origin_dev, bdi_bits) ||
+		is_congested(cache->hot_cache_dev, bdi_bits) ||
+		is_congested(cache->cold_cache_dev, bdi_bits);
+#else 
 	return is_congested(cache->origin_dev, bdi_bits) ||
 		is_congested(cache->cache_dev, bdi_bits);
+#endif
 }
 
 #define DEFAULT_MIGRATION_THRESHOLD 2048
@@ -2475,6 +2987,7 @@ static int cache_is_congested(struct dm_target_callbacks *cb, int bdi_bits)
 static int cache_create(struct cache_args *ca, struct cache **result)
 {
 	int r = 0;
+    uint16_t i = 0;
 	char **error = &ca->ti->error;
 	struct cache *cache;
 	struct dm_target *ti = ca->ti;
@@ -2488,6 +3001,50 @@ static int cache_create(struct cache_args *ca, struct cache **result)
 
 	cache->ti = ca->ti;
 	ti->private = cache;
+#ifdef CONFIG_DM_MULTI_USER 
+	/* 
+	 * number of flush bios is the same as devices excludes meta device, 
+     * i.e., hot cache device, cold cache device and origin device
+	 */
+	ti->num_flush_bios = 3;
+	ti->flush_supported = true;
+	ti->num_discard_bios = 1;
+	ti->discards_supported = true;
+	ti->split_discard_bios = false;
+
+	cache->features = ca->features;
+	ti->per_io_data_size = get_per_bio_data_size(cache);
+
+	/* 
+	 * This callback is used to detect if the cache device or origin device 
+	 * is congested. The method is to see if queue in the device is congested
+	 * with function bdi_congested(q->backing_dev_info, bdi_bits)
+	 */
+	cache->callbacks.congested_fn = cache_is_congested;
+	dm_table_add_target_callbacks(ti->table, &cache->callbacks);
+
+	cache->metadata_dev = ca->metadata_dev;
+	cache->origin_dev = ca->origin_dev;
+	cache->hot_cache_dev = ca->hot_cache_dev;
+	cache->cold_cache_dev = ca->cold_cache_dev;
+
+	ca->metadata_dev = ca->origin_dev = ca->hot_cache_dev = ca->cold_cache_dev = NULL;
+
+	origin_blocks = cache->origin_sectors = ca->origin_sectors;
+	origin_blocks = block_div(origin_blocks, ca->block_size);
+	cache->origin_blocks = to_oblock(origin_blocks);
+
+	cache->user_id = ca->user_id;
+	cache->cold_id = ca->cold_id;
+	cache->hot_id = ca->hot_id;
+
+	/* get sizes and names for cache devices */
+	for (i=0; i<NUM_CHANNELS; i++)
+	{
+		cache->dev_size[i] = ca->dev_size[i];
+		strlcpy(cache->cdev_name[i],ca->cdev_name[i],sizeof(ca->cdev_name[i]));
+	}
+#else
 	ti->num_flush_bios = 2;
 	ti->flush_supported = true;
 
@@ -2517,6 +3074,7 @@ static int cache_create(struct cache_args *ca, struct cache **result)
 	origin_blocks = cache->origin_sectors = ca->origin_sectors;
 	origin_blocks = block_div(origin_blocks, ca->block_size);
 	cache->origin_blocks = to_oblock(origin_blocks);
+#endif
 
 	cache->sectors_per_block = ca->block_size;
 	if (dm_set_target_max_io_len(ti, cache->sectors_per_block)) {
@@ -2524,6 +3082,41 @@ static int cache_create(struct cache_args *ca, struct cache **result)
 		goto bad;
 	}
 
+#ifdef CONFIG_DM_MULTI_USER 
+	/* use dm_cbn_t rather than dm_cblock_t */
+	if (ca->block_size & (ca->block_size - 1)) {
+		dm_block_t cache_size = ca->cache_sectors;
+
+		cache->sectors_per_block_shift = -1;
+		cache_size = block_div(cache_size, ca->block_size);
+		set_cache_size(cache, to_cbn(cache_size));
+	} else {
+		cache->sectors_per_block_shift = __ffs(ca->block_size);
+		set_cache_size(cache, to_cbn(ca->cache_sectors >> cache->sectors_per_block_shift));
+	}
+
+	/* WHT added: set user cache size and offset */
+	/* set user cache size for hot cache(true) and cold cache(false) */
+	set_user_cache_size(cache, to_cbn(ca->hot_cache_size), true);
+	set_user_cache_size(cache, to_cbn(ca->cold_cache_size), false);
+	/* get overall user cache size, which is the sum of hot and cold cache */
+	cache->user_cache_size = cache->hot_cache_size + cache->cold_cache_size;
+	/* user offset on hot and cold devices */
+	cache->hot_cache_off = ca->hot_cache_off;
+	cache->cold_cache_off = ca->cold_cache_off;
+	/* get hot and cold device size in blocks */
+	cache->hot_dev_size = block_div(ca->dev_size[cache->hot_id], ca->block_size);
+	cache->cold_dev_size = block_div(ca->dev_size[cache->cold_id], ca->block_size);
+	/* compute user dirty bitset offset on hot and cold device */
+	cache->hot_dirty_off = dm_div_up(cache->hot_cache_off, BITS_PER_LONG);
+	cache->cold_dirty_off = dm_div_up(cache->hot_dev_size + cache->cold_cache_off, BITS_PER_LONG);
+	/*
+	 * The dirty bitset is like this:
+	 * |<-------hot cache device------>|<--------cold cache device--------->|
+	 * |------|<--user hot cache-->|---|----|<--user cold cache-->|---------|
+	 * |<-----------------------------dirty bitset------------------------->|
+	 */
+#else
 	if (ca->block_size & (ca->block_size - 1)) {
 		dm_block_t cache_size = ca->cache_sectors;
 
@@ -2534,6 +3127,7 @@ static int cache_create(struct cache_args *ca, struct cache **result)
 		cache->sectors_per_block_shift = __ffs(ca->block_size);
 		set_cache_size(cache, to_cblock(ca->cache_sectors >> cache->sectors_per_block_shift));
 	}
+#endif
 
 	r = create_cache_policy(cache, ca, error);
 	if (r)
@@ -2591,12 +3185,22 @@ static int cache_create(struct cache_args *ca, struct cache **result)
 
 	r = -ENOMEM;
 	atomic_set(&cache->nr_dirty, 0);
+#ifdef CONFIG_DM_MULTI_USER 
+	/* here we create a dirty_bitset for user cache */
+	cache->dirty_bitset = alloc_bitset(from_cbn(cache->user_cache_size));
+	if (!cache->dirty_bitset) {
+		*error = "could not allocate dirty bitset";
+		goto bad;
+	}
+	clear_bitset(cache->dirty_bitset, from_cbn(cache->user_cache_size));
+#else
 	cache->dirty_bitset = alloc_bitset(from_cblock(cache->cache_size));
 	if (!cache->dirty_bitset) {
 		*error = "could not allocate dirty bitset";
 		goto bad;
 	}
 	clear_bitset(cache->dirty_bitset, from_cblock(cache->cache_size));
+#endif
 
 	cache->discard_block_size =
 		calculate_discard_block_size(cache->sectors_per_block,
@@ -2724,6 +3328,15 @@ static int cache_ctr(struct dm_target *ti, unsigned argc, char **argv)
 	}
 
 	ti->private = cache;
+
+#ifdef CONFIG_DM_MULTI_USER 
+	/* output information about this target */
+	DMWARN("create: sectors per block = %lu, cache blocks = %u, user id = %u, hot cache id = %u, cold cache id = %u, hot range = [%u, %u), cold range = [%u, %u)",
+			cache->sectors_per_block, cache->cache_size, cache->user_id, cache->hot_id, cache->cold_id,
+			cache->hot_cache_off, cache->hot_cache_off + cache->hot_cache_size,
+			cache->cold_cache_off, cache->cold_cache_off + cache->cold_cache_size);
+#endif
+
 out:
 	destroy_cache_args(ca);
 	return r;
@@ -2790,9 +3403,16 @@ static int write_dirty_bitset(struct cache *cache)
 	if (get_cache_mode(cache) >= CM_READ_ONLY)
 		return -EINVAL;
 
+#ifdef CONFIG_DM_MULTI_USER
+	/* set dirty_bitset according user cache size */
+	r = dm_cache_set_dirty_bits(cache->cmd, from_cbn(cache->user_cache_size), cache->dirty_bitset);
+	if (r)
+		metadata_operation_failed(cache, "dm_cache_set_dirty_bits for user cache", r);
+#else
 	r = dm_cache_set_dirty_bits(cache->cmd, from_cblock(cache->cache_size), cache->dirty_bitset);
 	if (r)
 		metadata_operation_failed(cache, "dm_cache_set_dirty_bits", r);
+#endif
 
 	return r;
 }
@@ -2997,6 +3617,61 @@ static int load_discard(void *context, sector_t discard_block_size,
 	return 0;
 }
 
+#ifdef CONFIG_DM_MULTI_USER 
+/* WHT modified: use dm_cbn_t as size type */
+static bool can_resize(struct cache *cache, dm_cbn_t new_size)
+{
+	if (from_cbn(new_size) > from_cbn(cache->cache_size))
+		return true;
+
+	/*
+	 * We can't drop a dirty block when shrinking the cache.
+	 */
+	while (from_cbn(new_size) < from_cbn(cache->cache_size)) {
+		new_size = to_cbn(from_cbn(new_size) + 1);
+		if (is_dirty(cache, new_size)) {
+			DMERR("%s: unable to shrink cache; cache block %llu is dirty",
+			      cache_device_name(cache),
+			      (unsigned long long) from_cbn(new_size));
+			return false;
+		}
+	}
+
+	return true;
+}
+
+static int resize_cache_dev(struct cache *cache, dm_cbn_t new_size)
+{
+	int r;
+
+	/* WHT modified: 
+	 * set metadata cache blocks to user share, not the whole cache device
+	 * if the cache_dev size changed, the just add the change to hot_cache_size.
+	 * And because user_cache_size = hot_cache_size + cold_cache_size, we need
+	 * to add the user_cache_size too.
+	 */
+	/* 
+	 * Note that even if new size is the same as old size, we still need to resize it. 
+	 * The objective is not only change the cache size, but also set cmd accordingly.
+	 * If we don't do this, metedata operatios will fail.
+	 */
+	cache->hot_cache_size = cache->hot_cache_size + new_size - cache->cache_size;
+	cache->user_cache_size = cache->user_cache_size + new_size - cache->cache_size;
+	r = dm_cache_resize(cache->cmd, cache->user_cache_size);
+	if (r) {
+		DMERR("%s: could not resize cache metadata", cache_device_name(cache));
+		metadata_operation_failed(cache, "dm_cache_resize", r);
+		return r;
+	}
+	set_cache_size(cache, new_size);
+
+	return 0;
+}
+#else
+/* 
+ * we don't need this function, because device sizes are all stored in
+ * dev_size array 
+ */
 static dm_cblock_t get_cache_dev_size(struct cache *cache)
 {
 	sector_t size = get_dev_size(cache->cache_dev);
@@ -3040,12 +3715,21 @@ static int resize_cache_dev(struct cache *cache, dm_cblock_t new_size)
 
 	return 0;
 }
+#endif
 
 static int cache_preresume(struct dm_target *ti)
 {
 	int r = 0;
 	struct cache *cache = ti->private;
+
+#ifdef CONFIG_DM_MULTI_USER 
+	dm_cbn_t csize = 0;
+	sector_t size = cache->dev_size[cache->hot_id] + cache->dev_size[cache->cold_id];
+	(void) sector_div(size, cache->sectors_per_block);
+	csize = to_cbn(size);
+#else
 	dm_cblock_t csize = get_cache_dev_size(cache);
+#endif
 
 	/*
 	 * Check to see if the cache has resized.
@@ -3133,7 +3817,12 @@ static void cache_status(struct dm_target *ti, status_type_t type,
 	dm_block_t nr_blocks_metadata = 0;
 	char buf[BDEVNAME_SIZE];
 	struct cache *cache = ti->private;
+#ifdef CONFIG_DM_MULTI_USER 
+	/* use dm_cbn_t as size type */
+	dm_cbn_t residency;
+#else
 	dm_cblock_t residency;
+#endif
 	bool needs_check;
 
 	switch (type) {
@@ -3162,7 +3851,25 @@ static void cache_status(struct dm_target *ti, status_type_t type,
 		}
 
 		residency = policy_residency(cache->policy);
-
+#ifdef CONFIG_DM_MULTI_USER 
+		/* output stats for user cache */
+		DMEMIT("%u %llu/%llu %llu %llu/%llu %u %u %u %u %u %u %lu %llu/%llu ",
+		       (unsigned)DM_CACHE_METADATA_BLOCK_SIZE,
+		       (unsigned long long)(nr_blocks_metadata - nr_free_blocks_metadata),
+		       (unsigned long long) nr_blocks_metadata,
+		       (unsigned long long) cache->sectors_per_block,
+		       (unsigned long long) from_cbn(residency),
+		       (unsigned long long) from_cbn(cache->user_cache_size),
+		       (unsigned) atomic_read(&cache->stats.read_hit),
+		       (unsigned) atomic_read(&cache->stats.read_miss),
+		       (unsigned) atomic_read(&cache->stats.write_hit),
+		       (unsigned) atomic_read(&cache->stats.write_miss),
+		       (unsigned) atomic_read(&cache->stats.demotion),
+		       (unsigned) atomic_read(&cache->stats.promotion),
+		       (unsigned long) atomic_read(&cache->nr_dirty),
+		       (unsigned long long) from_cbn(cache->hot_cache_size),
+		       (unsigned long long) from_cbn(cache->cold_cache_size));
+#else
 		DMEMIT("%u %llu/%llu %llu %llu/%llu %u %u %u %u %u %u %lu ",
 		       (unsigned)DM_CACHE_METADATA_BLOCK_SIZE,
 		       (unsigned long long)(nr_blocks_metadata - nr_free_blocks_metadata),
@@ -3177,7 +3884,7 @@ static void cache_status(struct dm_target *ti, status_type_t type,
 		       (unsigned) atomic_read(&cache->stats.demotion),
 		       (unsigned) atomic_read(&cache->stats.promotion),
 		       (unsigned long) atomic_read(&cache->nr_dirty));
-
+#endif
 		if (cache->features.metadata_version == 2)
 			DMEMIT("2 metadata2 ");
 		else
@@ -3225,8 +3932,16 @@ static void cache_status(struct dm_target *ti, status_type_t type,
 	case STATUSTYPE_TABLE:
 		format_dev_t(buf, cache->metadata_dev->bdev->bd_dev);
 		DMEMIT("%s ", buf);
+#ifdef CONFIG_DM_MULTI_USER 
+		/* we have 2 cache devices, so we need format all of them */
+		format_dev_t(buf, cache->hot_cache_dev->bdev->bd_dev);
+		DMEMIT("%s ", buf);
+		format_dev_t(buf, cache->cold_cache_dev->bdev->bd_dev);
+		DMEMIT("%s ", buf);
+#else 
 		format_dev_t(buf, cache->cache_dev->bdev->bd_dev);
 		DMEMIT("%s ", buf);
+#endif
 		format_dev_t(buf, cache->origin_dev->bdev->bd_dev);
 		DMEMIT("%s", buf);
 
@@ -3246,10 +3961,20 @@ err:
  * Defines a range of cblocks, begin to (end - 1) are in the range.  end is
  * the one-past-the-end value.
  */
+#ifdef CONFIG_DM_MULTI_USER 
+/* WHT modified: this range is in abut logical cache blocks, so we use dm_cbn_t
+ * rather than dm_cblock_t which includes physical cache block number
+ */
+struct cblock_range {
+	dm_cbn_t begin;
+	dm_cbn_t end;
+};
+#else
 struct cblock_range {
 	dm_cblock_t begin;
 	dm_cblock_t end;
 };
+#endif
 
 /*
  * A cache block range can take two forms:
@@ -3271,11 +3996,20 @@ static int parse_cblock_range(struct cache *cache, const char *str,
 	if (r < 0)
 		return r;
 
+#ifdef CONFIG_DM_MULTI_USER 
+	/* use logical cache block number here */
+	if (r == 2) {
+		result->begin = to_cbn(b);
+		result->end = to_cbn(e);
+		return 0;
+	}
+#else
 	if (r == 2) {
 		result->begin = to_cblock(b);
 		result->end = to_cblock(e);
 		return 0;
 	}
+#endif
 
 	/*
 	 * That didn't work, try form (i).
@@ -3284,11 +4018,20 @@ static int parse_cblock_range(struct cache *cache, const char *str,
 	if (r < 0)
 		return r;
 
+#ifdef CONFIG_DM_MULTI_USER 
+	/* WHT modified: use logical cache block number here */
+	if (r == 1) {
+		result->begin = to_cbn(b);
+		result->end = to_cbn(from_cbn(result->begin) + 1u);
+		return 0;
+	}
+#else 
 	if (r == 1) {
 		result->begin = to_cblock(b);
 		result->end = to_cblock(from_cblock(result->begin) + 1u);
 		return 0;
 	}
+#endif
 
 	DMERR("%s: invalid cblock range '%s'", cache_device_name(cache), str);
 	return -EINVAL;
@@ -3296,9 +4039,16 @@ static int parse_cblock_range(struct cache *cache, const char *str,
 
 static int validate_cblock_range(struct cache *cache, struct cblock_range *range)
 {
+#ifdef CONFIG_DM_MULTI_USER
+    /* use cbn rather than cblock to represent cache block number */
+	uint64_t b = from_cbn(range->begin);
+	uint64_t e = from_cbn(range->end);
+	uint64_t n = from_cbn(cache->cache_size);
+#else`
 	uint64_t b = from_cblock(range->begin);
 	uint64_t e = from_cblock(range->end);
 	uint64_t n = from_cblock(cache->cache_size);
+#endif
 
 	if (b >= n) {
 		DMERR("%s: begin cblock out of range: %llu >= %llu",
@@ -3321,10 +4071,17 @@ static int validate_cblock_range(struct cache *cache, struct cblock_range *range
 	return 0;
 }
 
+#ifdef CONFIG_DM_MULTI_USER
+static inline dm_cbn_t cblock_succ(dm_cbn_t b)
+{
+	return to_cbn(from_cbn(b) + 1);
+}
+#else
 static inline dm_cblock_t cblock_succ(dm_cblock_t b)
 {
 	return to_cblock(from_cblock(b) + 1);
 }
+#endif
 
 static int request_invalidation(struct cache *cache, struct cblock_range *range)
 {
@@ -3418,10 +4175,20 @@ static int cache_iterate_devices(struct dm_target *ti,
 	int r = 0;
 	struct cache *cache = ti->private;
 
+#ifdef CONFIG_DM_MULTI_USER 
+	/* iterate all the cache devices, including hot cache device,
+	 * cold cache device and origin device.
+	 */
+	r = fn(ti, cache->hot_cache_dev, 0, get_dev_size(cache->hot_cache_dev), data);
+	if (!r)
+		r = fn(ti, cache->cold_cache_dev, 0, get_dev_size(cache->cold_cache_dev), data);
+	if (!r)
+		r = fn(ti, cache->origin_dev, 0, ti->len, data);
+#else 
 	r = fn(ti, cache->cache_dev, 0, get_dev_size(cache->cache_dev), data);
 	if (!r)
 		r = fn(ti, cache->origin_dev, 0, ti->len, data);
-
+#endif
 	return r;
 }
 

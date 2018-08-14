@@ -44,7 +44,14 @@ struct entry {
 	bool allocated:1;
 	bool sentinel:1;
 	bool pending_work:1;
-
+#ifdef CONFIG_DM_MULTI_USER 
+    /* use one bit to indicate if this entry is hot(true)
+     * or cold(false). And an uint32_t dbn to record the cache block number
+     * on the cache device.
+     */
+	bool hot:1;
+	dm_cbn_t dbn;
+#endif
 	dm_oblock_t oblock;
 };
 
@@ -503,6 +510,12 @@ static void q_requeue(struct queue *q, struct entry *e, unsigned extra_levels,
 	q_del(q, e);
 	e->level = new_level;
 	q_push(q, e);
+
+#ifdef CONFIG_DM_MULTI_USER 
+/* check if this entry's level is higher than hot level */
+    if ((e->hot == false)&&(e->level >= mq->hot_level))
+        mq->hot_shared_cbk ++；
+#endif
 }
 
 /*----------------------------------------------------------------*/
@@ -686,7 +699,53 @@ static void h_remove(struct smq_hash_table *ht, struct entry *e)
 }
 
 /*----------------------------------------------------------------*/
+#ifdef CONFIG_DM_MULTI_USER 
+/* record the number of hot/cold blocks allocated */
+struct entry_alloc {
+	struct entry_space *es;
+	unsigned begin;
 
+	unsigned nr_allocated;
+	unsigned nr_hot_allocated;  /* number of hot blocks allocated */
+	unsigned nr_cold_allocated; /* number of cold blocks allocated */
+	struct ilist free;
+};
+
+static void init_allocator(struct entry_alloc *ea, struct entry_space *es,
+			   unsigned begin, unsigned end)
+{
+	unsigned i;
+
+	ea->es = es;
+	ea->nr_allocated = 0u;
+	ea->nr_hot_allocated = 0u;
+	ea->nr_cold_allocated = 0u;
+	ea->begin = begin;
+
+	l_init(&ea->free);
+	for (i = begin; i != end; i++)
+		l_add_tail(ea->es, &ea->free, __get_entry(ea->es, i));
+	
+}
+
+static void init_entry(struct entry *e, bool hot)
+{
+	/*
+	 * We can't memset because that would clear the hotspot and
+	 * sentinel bits which remain constant.
+	 */
+	e->hash_next = INDEXER_NULL;
+	e->next = INDEXER_NULL;
+	e->prev = INDEXER_NULL;
+	e->level = 0u;
+	e->dirty = true;	/* FIXME: audit */
+	e->allocated = true;
+	e->sentinel = false;
+	e->pending_work = false;
+	e->hot = hot;   /* init hot bit */
+	e->dbn = 0u;    /* init cache device block number */
+}
+#else
 struct entry_alloc {
 	struct entry_space *es;
 	unsigned begin;
@@ -724,7 +783,62 @@ static void init_entry(struct entry *e)
 	e->sentinel = false;
 	e->pending_work = false;
 }
+#endif
 
+#ifdef CONFIG_DM_MULTI_USER 
+/* WHT modified: allocate hot or cold entry */
+static struct entry *alloc_entry(struct entry_alloc *ea, bool hot)
+{
+	struct entry *e;
+
+	if (l_empty(&ea->free))
+		return NULL;
+
+	e = l_pop_head(ea->es, &ea->free);
+	init_entry(e, hot);
+	ea->nr_allocated++;
+	if (hot)
+		ea->nr_hot_allocated++;
+	else 
+		ea->nr_cold_allocated++;
+
+	return e;
+}
+
+/*
+ * This assumes the cblock hasn't already been allocated.
+ */
+static struct entry *alloc_particular_entry(struct entry_alloc *ea, unsigned i, bool hot)
+{
+	struct entry *e = __get_entry(ea->es, ea->begin + i);
+
+	BUG_ON(e->allocated);
+
+	l_del(ea->es, &ea->free, e);
+	init_entry(e, hot);
+	ea->nr_allocated++;
+	if (hot)
+		ea->nr_hot_allocated++;
+	else 
+		ea->nr_cold_allocated++;
+
+	return e;
+}
+
+static void free_entry(struct entry_alloc *ea, struct entry *e)
+{
+	BUG_ON(!ea->nr_allocated);
+	BUG_ON(!e->allocated);
+
+	ea->nr_allocated--;
+	if (e->hot)
+		ea->nr_hot_allocated--;
+	else 
+		ea->nr_cold_allocated--;
+	e->allocated = false;
+	l_add_tail(ea->es, &ea->free, e);
+}
+#else
 static struct entry *alloc_entry(struct entry_alloc *ea)
 {
 	struct entry *e;
@@ -764,6 +878,7 @@ static void free_entry(struct entry_alloc *ea, struct entry *e)
 	e->allocated = false;
 	l_add_tail(ea->es, &ea->free, e);
 }
+#endif
 
 static bool allocator_empty(struct entry_alloc *ea)
 {
@@ -796,7 +911,20 @@ struct smq_policy {
 
 	/* protects everything */
 	spinlock_t lock;
+#ifdef CONFIG_DM_MULTI_USER 
+	/* we use dm_cbn_t as a size type, which is enough for cache size. 
+     * The dm_cblock_t is changed to a struct.
+	 */
+    dm_cbn_t cache_size;
+    dm_cbn_t hot_cache_size;
+    dm_cbn_t cold_cache_size;
+	uint32_t hot_level;             /* consider it hot if a entry's level reach this */
+	unsigned long *hot_cache_bits;  /* monitor hot cache device allocation */
+	unsigned long *cold_cache_bits; /* monitor cold cache device allocation */
+	uint64_t hot_shared_cbk;        /* hot cache block in shared pool (cold cache) */
+#else
 	dm_cblock_t cache_size;
+#endif
 	sector_t cache_block_size;
 
 	sector_t hotspot_block_size;
@@ -983,10 +1111,22 @@ static void push_front(struct smq_policy *mq, struct entry *e)
 		push_queue_front(mq, e);
 }
 
+#ifdef CONFIG_DM_MULTI_USER 
+/* convert a entry number to cache block number */
+static dm_cblock_t infer_cblock(struct smq_policy *mq, struct entry *e)
+{
+	dm_cblock_t cblock;
+	cblock.cbn = to_cbn(get_index(&mq->cache_alloc, e));
+	cblock.dbn = e->dbn;
+	cblock.hot = e->hot;
+	return cblock;
+}
+#else
 static dm_cblock_t infer_cblock(struct smq_policy *mq, struct entry *e)
 {
 	return to_cblock(get_index(&mq->cache_alloc, e));
 }
+#endif
 
 static void requeue(struct smq_policy *mq, struct entry *e)
 {
@@ -1065,6 +1205,10 @@ static void update_promote_levels(struct smq_policy *mq)
 
 	mq->read_promote_level = NR_HOTSPOT_LEVELS - threshold_level;
 	mq->write_promote_level = (NR_HOTSPOT_LEVELS - threshold_level);
+#ifdef CONFIG_DM_MULTI_USER 
+	/* update hot_level accordingly */
+	mq->hot_level = min(mq->read_promote_level + NR_HOTSPOT_LEVELS/4u, NR_HOTSPOT_LEVELS);
+#endif
 }
 
 /*
@@ -1104,7 +1248,12 @@ static void end_hotspot_period(struct smq_policy *mq)
 static void end_cache_period(struct smq_policy *mq)
 {
 	if (time_after(jiffies, mq->next_cache_period)) {
+#ifdef CONFIG_DM_MULTI_USER 
+		/* cache size is uint32_t */
+		clear_bitset(mq->cache_hit_bits, from_cbn(mq->cache_size));
+#else
 		clear_bitset(mq->cache_hit_bits, from_cblock(mq->cache_size));
+#endif
 
 		q_redistribute(&mq->dirty);
 		q_redistribute(&mq->clean);
@@ -1124,7 +1273,12 @@ static void end_cache_period(struct smq_policy *mq)
 
 static unsigned percent_to_target(struct smq_policy *mq, unsigned p)
 {
+#ifdef CONFIG_DM_MULTI_USER 
+	/* cache size type is dm_cbn_t */
+	return from_cbn(mq->cache_size) * p / 100u;
+#else
 	return from_cblock(mq->cache_size) * p / 100u;
+#endif
 }
 
 static bool clean_target_met(struct smq_policy *mq, bool idle)
@@ -1150,7 +1304,12 @@ static bool free_target_met(struct smq_policy *mq)
 {
 	unsigned nr_free;
 
+#ifdef CONFIG_DM_MULTI_USER 
+	/* cache size type is dm_cbn_t */
+	nr_free = from_cbn(mq->cache_size) - mq->cache_alloc.nr_allocated;
+#else
 	nr_free = from_cblock(mq->cache_size) - mq->cache_alloc.nr_allocated;
+#endif
 	return (nr_free + btracker_nr_demotions_queued(mq->bg_work)) >=
 		percent_to_target(mq, FREE_TARGET);
 }
@@ -1217,6 +1376,20 @@ static void queue_demotion(struct smq_policy *mq)
 	work.oblock = e->oblock;
 	work.cblock = infer_cblock(mq, e);
 	r = btracker_queue(mq->bg_work, &work, NULL);
+#ifdef CONFIG_DM_MULTI_USER 
+	/* we need to clear the bit for this cblock to make sure that this block
+	 * on cache device can be reallocated. 
+	 */
+	if(work.cblock.hot)
+		clear_bit(work.cblock.dbn, mq->hot_cache_bits);
+	else
+	{
+		clear_bit(work.cblock.dbn, mq->cold_cache_bits);
+        /* if it's a hot block in shared pool, we reduce its hot count */
+		if (mq->hot_shared_cbk && (e->level >= mq->hot_level))
+			mq->hot_shared_cbk --;
+	}
+#endif
 	if (r) {
 		clear_pending(mq, e);
 		q_push_front(&mq->clean, e);
@@ -1246,6 +1419,97 @@ static void queue_promotion(struct smq_policy *mq, dm_oblock_t oblock,
 	if (btracker_promotion_already_present(mq->bg_work, oblock))
 		return;
 
+#ifdef CONFIG_DM_MULTI_USER 
+    /* WHT modified: record heat and device cache block, for now we mark 
+     * the entry whose level smaller than mq->hot_level to cold and 
+     * others to hot.
+     * We can't get hot bit from e because that the entry e is newly allocated, 
+	 * so it is always cold which is not right due to the fact that this block must
+	 * be hot enough on the HDD to be promted into cache.
+	 * So we use hs_e, which record the heat level of HDD blocks.
+	 */
+	if (hs_e->level < mq->hot_level)
+    {
+	    /* We first try to allocate a cold cache block from cold cache channel,
+	     * but if there is no more free space in cold cache channel, we change
+		 * this cache block to hot.
+		 * By doing this we can better utilize cache space.
+	     */
+		if (mq->cache_alloc.nr_cold_allocated < mq->cold_cache_size)
+		{
+		    /* We allocate the entry now to reserve the cblock and set it to cold. */
+		    e = alloc_entry(&mq->cache_alloc, false);
+            /* find a empty block on cold cache device */
+            e->dbn = find_first_zero_bit(mq->cold_cache_bits, mq->cold_cache_size);
+            if (test_and_set_bit(e->dbn, mq->cold_cache_bits))
+             	DMERR("queue_promotion: fail to set cold bit for e->dbn = %u", e->dbn);
+		}
+		else if(mq->cache_alloc.nr_hot_allocated < mq->hot_cache_size)
+		{
+			/* This means that cold cache channel is not enough for cold cache blocks,
+			 * so we allocat it from hot cache channel.
+			 */
+		    /* We allocate the entry now to reserve the cblock and set it to hot. */
+		    e = alloc_entry(&mq->cache_alloc, true);
+            /* find a empty block on hot cache device */
+            e->dbn = find_first_zero_bit(mq->hot_cache_bits, mq->hot_cache_size);
+            if (test_and_set_bit(e->dbn, mq->hot_cache_bits))
+             	DMERR("queue_promotion: fail to set hot bit for e->dbn = %u", e->dbn);
+		}
+		else 
+		{
+			/* 
+			 * There are no more free space in both channel, need to demote some cold 
+			 * blocks
+			 */
+			queue_demotion(mq);
+			return;
+		}
+    }
+    else 
+    {
+	    /* We first try to allocate a hot cache block from hot cache channel,
+	     * but if there is no more free space in hot cache channel, we change
+		 * this cache block to cold.
+		 * By doing this we can better utilize cache space.
+	     */
+		if (mq->cache_alloc.nr_hot_allocated < mq->hot_cache_size)
+		{
+		    /* We allocate the entry now to reserve the cblock and set it to hot. */
+		    e = alloc_entry(&mq->cache_alloc, true);
+            /* find a empty block on hot cache device */
+            e->dbn = find_first_zero_bit(mq->hot_cache_bits, mq->hot_cache_size);
+            if (test_and_set_bit(e->dbn, mq->hot_cache_bits))
+             	DMERR("queue_promotion: fail to set hot bit for e->dbn = %u", e->dbn);
+		}
+		else if (mq->cache_alloc.nr_cold_allocated < mq->cold_cache_size) 
+		{
+		    /* We allocate the entry now to reserve the cblock and set it to cold. */
+		    e = alloc_entry(&mq->cache_alloc, false);
+			/* increase hot cache block in cold channel*/
+			mq->hot_shared_cbk++;
+            /* find a empty block on cold cache device */
+            e->dbn = find_first_zero_bit(mq->cold_cache_bits, mq->cold_cache_size);
+            if (test_and_set_bit(e->dbn, mq->cold_cache_bits))
+             	DMERR("queue_promotion: fail to set cold bit for e->dbn = %u", e->dbn);
+		}
+		else 
+		{
+			/* 
+			 * There are no more free space in both channel, need to demote some cold 
+			 * blocks
+			 */
+			queue_demotion(mq);
+			return;
+		}
+    }
+	BUG_ON(!e);
+	e->pending_work = true;
+	work.op = POLICY_PROMOTE;
+	work.oblock = oblock;
+    /* return the cblock struct for work*/
+	work.cblock = infer_cblock(mq, e);
+#else
 	/*
 	 * We allocate the entry now to reserve the cblock.  If the
 	 * background work is aborted we must remember to free it.
@@ -1256,6 +1520,7 @@ static void queue_promotion(struct smq_policy *mq, dm_oblock_t oblock,
 	work.op = POLICY_PROMOTE;
 	work.oblock = oblock;
 	work.cblock = infer_cblock(mq, e);
+#endif
 	r = btracker_queue(mq->bg_work, &work, workp);
 	if (r)
 		free_entry(&mq->cache_alloc, e);
@@ -1574,6 +1839,54 @@ static int smq_load_mapping(struct dm_cache_policy *p,
 	return 0;
 }
 
+#ifdef CONFIG_DM_MULTI_USER 
+/* WHT modified: invalidate logical cache block number */
+static int smq_invalidate_mapping(struct dm_cache_policy *p, dm_cbn_t cblock)
+{
+	struct smq_policy *mq = to_smq_policy(p);
+	struct entry *e = get_entry(&mq->cache_alloc, from_cbn(cblock));
+
+	if (!e->allocated)
+		return -ENODATA;
+	// FIXME: what if this block has pending background work?
+	/* we want to remove this entry, so we mark its cache block bit to 0 so as 
+	 * to make it available for allocation. 
+	 */
+	if (e->hot)
+		clear_bit(e->dbn, mq->hot_cache_bits);
+	else
+		clear_bit(e->dbn, mq->cold_cache_bits);
+	del_queue(mq, e);
+	h_remove(&mq->table, e);
+	free_entry(&mq->cache_alloc, e);
+	return 0;
+}
+
+/* WHT modified: return cache residency, dm_cbn_t is a bitwise uint32_t */
+static uint32_t smq_get_hint(struct dm_cache_policy *p, dm_cbn_t cblock)
+{
+	struct smq_policy *mq = to_smq_policy(p);
+	struct entry *e = get_entry(&mq->cache_alloc, from_cbn(cblock));
+
+	if (!e->allocated)
+		return 0;
+
+	return e->level;
+}
+/* WHT modified: retrun residency */
+static dm_cbn_t smq_residency(struct dm_cache_policy *p)
+{
+	dm_cbn_t r;
+	unsigned long flags;
+	struct smq_policy *mq = to_smq_policy(p);
+
+	spin_lock_irqsave(&mq->lock, flags);
+	r = to_cbn(mq->cache_alloc.nr_allocated);
+	spin_unlock_irqrestore(&mq->lock, flags);
+
+	return r;
+}
+#else
 static int smq_invalidate_mapping(struct dm_cache_policy *p, dm_cblock_t cblock)
 {
 	struct smq_policy *mq = to_smq_policy(p);
@@ -1612,6 +1925,7 @@ static dm_cblock_t smq_residency(struct dm_cache_policy *p)
 
 	return r;
 }
+#endif
 
 static void smq_tick(struct dm_cache_policy *p, bool can_block)
 {
@@ -1716,6 +2030,201 @@ static void calc_hotspot_params(sector_t origin_size,
 		*hotspot_block_size /= 2u;
 }
 
+#ifdef CONFIG_DM_MULTI_USER 
+/* WHT modified: create policy with user specified hot cache size 
+ * and cold cache size
+ */
+static struct dm_cache_policy *__smq_create(dm_cbn_t hot_cache_size,
+		                dm_cbn_t cold_cache_size,
+					    sector_t origin_size,
+					    sector_t cache_block_size,
+					    bool mimic_mq,
+					    bool migrations_allowed)
+{
+	unsigned i;
+	unsigned nr_sentinels_per_queue = 2u * NR_CACHE_LEVELS;
+	unsigned total_sentinels = 2u * nr_sentinels_per_queue;
+	struct smq_policy *mq = kzalloc(sizeof(*mq), GFP_KERNEL);
+
+	if (!mq)
+		return NULL;
+
+	init_policy_functions(mq, mimic_mq);
+	mq->cache_size = hot_cache_size + cold_cache_size;
+	mq->cache_block_size = cache_block_size;
+
+	mq->hot_cache_size = hot_cache_size;
+	mq->cold_cache_size = cold_cache_size;
+	mq->hot_shared_cbk = 0;
+
+    /* use bitsets to manage block allocation for hot cache and
+     * cold cache device.
+     */
+	/* allocate hot cache bitset */
+	mq->hot_cache_bits = alloc_bitset(mq->hot_cache_size); 
+	if (!mq->hot_cache_bits) {
+		DMERR("couldn't allocate hot cache bitset");
+		return NULL;
+	}
+	clear_bitset(mq->hot_cache_bits, mq->hot_cache_size);
+
+	/* allocate cold cache bitset */
+	mq->cold_cache_bits = alloc_bitset(mq->cold_cache_size); 
+	if (!mq->hot_cache_bits) {
+		DMERR("couldn't allocate cold cache bitset");
+		return NULL;
+	}
+	clear_bitset(mq->cold_cache_bits, mq->cold_cache_size);
+
+	/*
+	 * Logically, cache entry space consists of 4 parts: 
+	 * |<---------------->|<------------->|<-------------->|<---------------->|
+	 * |writeback sentinel|demote sentinel|hotspot sentinel|real cache entries|
+	 */
+
+	/* caculate hotspot parameters, including hotspot block size and 
+	 * number of hotspot blocks. 
+	 */
+	calc_hotspot_params(origin_size, cache_block_size, mq->cache_size, &mq->hotspot_block_size, 
+			&mq->nr_hotspot_blocks);
+
+	/* caculate how many cache blocks a hotspot block can host. */
+	mq->cache_blocks_per_hotspot_block = div64_u64(mq->hotspot_block_size, mq->cache_block_size);
+	mq->hotspot_level_jump = 1u;
+	if (space_init(&mq->es, total_sentinels + mq->nr_hotspot_blocks + mq->cache_size)) {
+		DMERR("couldn't initialize entry space");
+		goto bad_pool_init;
+	}
+
+	/* initiate writeback sentinel entries */
+	init_allocator(&mq->writeback_sentinel_alloc, &mq->es, 0, nr_sentinels_per_queue);
+	for (i = 0; i < nr_sentinels_per_queue; i++)
+		get_entry(&mq->writeback_sentinel_alloc, i)->sentinel = true;
+
+	/* initiate demotion sentinel entries */
+	init_allocator(&mq->demote_sentinel_alloc, &mq->es, nr_sentinels_per_queue, total_sentinels);
+	for (i = 0; i < nr_sentinels_per_queue; i++)
+		get_entry(&mq->demote_sentinel_alloc, i)->sentinel = true;
+
+	/* initiate hotspot entries */
+	init_allocator(&mq->hotspot_alloc, &mq->es, total_sentinels,
+		       total_sentinels + mq->nr_hotspot_blocks);
+
+	/* initiate cache entries */
+	init_allocator(&mq->cache_alloc, &mq->es,
+		       total_sentinels + mq->nr_hotspot_blocks,
+		       total_sentinels + mq->nr_hotspot_blocks + mq->cache_size);
+
+	/* initiate hotspot hit bitset */
+	mq->hotspot_hit_bits = alloc_bitset(mq->nr_hotspot_blocks);
+	if (!mq->hotspot_hit_bits) {
+		DMERR("couldn't allocate hotspot hit bitset");
+		goto bad_hotspot_hit_bits;
+	}
+	clear_bitset(mq->hotspot_hit_bits, mq->nr_hotspot_blocks);
+
+	/* initiate cache hit bitset */
+	if (mq->cache_size) {
+		mq->cache_hit_bits = alloc_bitset(mq->cache_size);
+		if (!mq->cache_hit_bits) {
+			DMERR("couldn't allocate cache hit bitset");
+			goto bad_cache_hit_bits;
+		}
+		clear_bitset(mq->cache_hit_bits, mq->cache_size);
+	} else
+		mq->cache_hit_bits = NULL;
+
+	mq->tick = 0;
+	spin_lock_init(&mq->lock);
+
+	/* initiate hotspot queue, clean queue and dirty queue */
+	q_init(&mq->hotspot, &mq->es, NR_HOTSPOT_LEVELS);
+	mq->hotspot.nr_top_levels = 8;
+	mq->hotspot.nr_in_top_levels = min(mq->nr_hotspot_blocks / NR_HOTSPOT_LEVELS,
+					   mq->cache_size / mq->cache_blocks_per_hotspot_block);
+
+	q_init(&mq->clean, &mq->es, NR_CACHE_LEVELS);
+	q_init(&mq->dirty, &mq->es, NR_CACHE_LEVELS);
+
+	/* initiate statistics */
+	stats_init(&mq->hotspot_stats, NR_HOTSPOT_LEVELS);
+	stats_init(&mq->cache_stats, NR_CACHE_LEVELS);
+
+	/* initiate cache mapping table and hotspot mapping table */
+	if (h_init(&mq->table, &mq->es, mq->cache_size))
+		goto bad_alloc_table;
+
+	if (h_init(&mq->hotspot_table, &mq->es, mq->nr_hotspot_blocks))
+		goto bad_alloc_hotspot_table;
+
+	/* 
+	 * init sentinel entries, i.e., insert writeback and demote sentinels 
+	 * to dirty and clean queue.
+	 */
+	sentinels_init(mq);
+	mq->write_promote_level = mq->read_promote_level = NR_HOTSPOT_LEVELS;
+
+	/* set a hot_level, if entry level higher than this level,
+	 * then we consider it a hot block 
+	 */
+	mq->hot_level = NR_HOTSPOT_LEVELS/2u;
+
+	/* set time interval for writeback and demote. */
+	mq->next_hotspot_period = jiffies;
+	mq->next_cache_period = jiffies;
+	/* Create background works, which are used for promotion, demotion and 
+	 * writeback of cache blocks.
+	 * We set the max number of works according to cache levels. 
+	 */
+	mq->bg_work = btracker_create(128*NR_CACHE_LEVELS);
+	if (!mq->bg_work)
+		goto bad_btracker;
+
+	mq->migrations_allowed = migrations_allowed;
+
+	return &mq->policy;
+
+bad_btracker:
+	h_exit(&mq->hotspot_table);
+bad_alloc_hotspot_table:
+	h_exit(&mq->table);
+bad_alloc_table:
+	free_bitset(mq->cache_hit_bits);
+bad_cache_hit_bits:
+	free_bitset(mq->hotspot_hit_bits);
+bad_hotspot_hit_bits:
+	space_exit(&mq->es);
+bad_pool_init:
+	kfree(mq);
+
+	return NULL;
+}
+
+/* WHT modified: create smq policy with user specified hot and cold cache size */
+static struct dm_cache_policy *smq_create(dm_cbn_t hot_cache_size,
+		              dm_cbn_t cold_cache_size,
+					  sector_t origin_size,
+					  sector_t cache_block_size)
+{
+	return __smq_create(hot_cache_size, cold_cache_size, origin_size, cache_block_size, false, true);
+}
+
+static struct dm_cache_policy *mq_create(dm_cbn_t hot_cache_size,
+		             dm_cbn_t cold_cache_size,
+					 sector_t origin_size,
+					 sector_t cache_block_size)
+{
+	return __smq_create(hot_cache_size, cold_cache_size, origin_size, cache_block_size, true, true);
+}
+
+static struct dm_cache_policy *cleaner_create(dm_cbn_t hot_cache_size,
+		                  dm_cbn_t cold_cache_size,
+					      sector_t origin_size,
+					      sector_t cache_block_size)
+{
+	return __smq_create(hot_cache_size, cold_cache_size, origin_size, cache_block_size, false, false);
+}
+#else
 static struct dm_cache_policy *__smq_create(dm_cblock_t cache_size,
 					    sector_t origin_size,
 					    sector_t cache_block_size,
@@ -1846,6 +2355,7 @@ static struct dm_cache_policy *cleaner_create(dm_cblock_t cache_size,
 {
 	return __smq_create(cache_size, origin_size, cache_block_size, false, false);
 }
+#endif
 
 /*----------------------------------------------------------------*/
 

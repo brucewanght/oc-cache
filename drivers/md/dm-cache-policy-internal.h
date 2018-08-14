@@ -61,6 +61,25 @@ static inline int policy_load_mapping(struct dm_cache_policy *p,
 	return p->load_mapping(p, oblock, cblock, dirty, hint, hint_valid);
 }
 
+#ifdef CONFIG_DM_MULTI_USER
+/* invalidate cache block through logical block number */
+static inline int policy_invalidate_mapping(struct dm_cache_policy *p,
+							    dm_cbn_t cblock)
+{
+	return p->invalidate_mapping(p, cblock);
+}
+/* WHT modified: use dm_cbn_t as size type */
+static inline uint32_t policy_get_hint(struct dm_cache_policy *p,
+						       dm_cbn_t cblock)
+{
+	return p->get_hint ? p->get_hint(p, cblock) : 0;
+}
+/* WHT modified: return residency of policay */
+static inline dm_cbn_t policy_residency(struct dm_cache_policy *p)
+{
+	return p->residency(p);
+}
+#else
 static inline int policy_invalidate_mapping(struct dm_cache_policy *p,
 					    dm_cblock_t cblock)
 {
@@ -77,6 +96,7 @@ static inline dm_cblock_t policy_residency(struct dm_cache_policy *p)
 {
 	return p->residency(p);
 }
+#endif
 
 static inline void policy_tick(struct dm_cache_policy *p, bool can_block)
 {
@@ -136,11 +156,15 @@ static inline void free_bitset(unsigned long *bits)
 
 /*----------------------------------------------------------------*/
 
-/*
- * Creates a new cache policy given a policy name, a cache size, an origin size and the block size.
- */
+#ifdef CONFIG_DM_MULTI_USER
+/* create a new policy given a policy name, a hot cache size an origin size and the block size */
+struct dm_cache_policy *dm_cache_policy_create(const char *name, dm_cbn_t hot_cache_size,
+				dm_cbn_t cold_cache_size, sector_t origin_size, sector_t block_size);
+#else 
+/* creates a new cache policy given a policy name, a cache size, an origin size and the block size */
 struct dm_cache_policy *dm_cache_policy_create(const char *name, dm_cblock_t cache_size,
 					       sector_t origin_size, sector_t block_size);
+#endif
 
 /*
  * Destroys the policy.  This drops references to the policy module as well

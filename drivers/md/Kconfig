@@ -334,6 +334,21 @@ config DM_CACHE_SMQ
          of less memory utilization, improved performance and increased
          adaptability in the face of changing workloads.
 
+#WHT added for LRU
+config DM_CACHE_LRU
+       tristate "LRU Cache Policy (EXPERIMENTAL)"
+       depends on DM_CACHE
+       default y
+       ---help---
+         A LRU cache policy.
+
+#WHT added for multi user in dm-cache
+config DM_MULTI_USER 
+       bool "Dm-cache multi user support"
+	   default y
+       ---help---
+         Add multi user support in dm-cache.
+
 config DM_WRITECACHE
 	tristate "Writecache target"
 	depends on BLK_DEV_DM
