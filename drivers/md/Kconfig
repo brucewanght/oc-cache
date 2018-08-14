@@ -335,12 +335,12 @@ config DM_CACHE_SMQ
          adaptability in the face of changing workloads.
 
 #WHT added for LRU
-config DM_CACHE_LRU
-       tristate "LRU Cache Policy (EXPERIMENTAL)"
-       depends on DM_CACHE
-       default y
-       ---help---
-         A LRU cache policy.
+#config DM_CACHE_LRU
+#       tristate "LRU Cache Policy (EXPERIMENTAL)"
+#       depends on DM_CACHE
+#       default y
+#       ---help---
+#         A LRU cache policy.
 
 #WHT added for multi user in dm-cache
 config DM_MULTI_USER 
