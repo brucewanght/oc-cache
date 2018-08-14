@@ -513,8 +513,10 @@ static void q_requeue(struct queue *q, struct entry *e, unsigned extra_levels,
 
 #ifdef CONFIG_DM_MULTI_USER 
 /* check if this entry's level is higher than hot level */
+/*
     if ((e->hot == false)&&(e->level >= mq->hot_level))
         mq->hot_shared_cbk ++；
+*/
 #endif
 }
 
@@ -921,7 +923,7 @@ struct smq_policy {
 	uint32_t hot_level;             /* consider it hot if a entry's level reach this */
 	unsigned long *hot_cache_bits;  /* monitor hot cache device allocation */
 	unsigned long *cold_cache_bits; /* monitor cold cache device allocation */
-	uint64_t hot_shared_cbk;        /* hot cache block in shared pool (cold cache) */
+	//uint64_t hot_shared_cbk;        /* hot cache block in shared pool (cold cache) */
 #else
 	dm_cblock_t cache_size;
 #endif
@@ -1386,8 +1388,10 @@ static void queue_demotion(struct smq_policy *mq)
 	{
 		clear_bit(work.cblock.dbn, mq->cold_cache_bits);
         /* if it's a hot block in shared pool, we reduce its hot count */
+		/*
 		if (mq->hot_shared_cbk && (e->level >= mq->hot_level))
 			mq->hot_shared_cbk --;
+		*/
 	}
 #endif
 	if (r) {
@@ -1487,7 +1491,7 @@ static void queue_promotion(struct smq_policy *mq, dm_oblock_t oblock,
 		    /* We allocate the entry now to reserve the cblock and set it to cold. */
 		    e = alloc_entry(&mq->cache_alloc, false);
 			/* increase hot cache block in cold channel*/
-			mq->hot_shared_cbk++;
+			//mq->hot_shared_cbk++;
             /* find a empty block on cold cache device */
             e->dbn = find_first_zero_bit(mq->cold_cache_bits, mq->cold_cache_size);
             if (test_and_set_bit(e->dbn, mq->cold_cache_bits))
@@ -2055,7 +2059,7 @@ static struct dm_cache_policy *__smq_create(dm_cbn_t hot_cache_size,
 
 	mq->hot_cache_size = hot_cache_size;
 	mq->cold_cache_size = cold_cache_size;
-	mq->hot_shared_cbk = 0;
+	//mq->hot_shared_cbk = 0;
 
     /* use bitsets to manage block allocation for hot cache and
      * cold cache device.
