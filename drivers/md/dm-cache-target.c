@@ -2986,7 +2986,6 @@ static int cache_is_congested(struct dm_target_callbacks *cb, int bdi_bits)
 static int cache_create(struct cache_args *ca, struct cache **result)
 {
 	int r = 0;
-    uint16_t i = 0;
 	char **error = &ca->ti->error;
 	struct cache *cache;
 	struct dm_target *ti = ca->ti;
@@ -4043,7 +4042,7 @@ static int validate_cblock_range(struct cache *cache, struct cblock_range *range
 	uint64_t b = from_cbn(range->begin);
 	uint64_t e = from_cbn(range->end);
 	uint64_t n = from_cbn(cache->cache_size);
-#else`
+#else
 	uint64_t b = from_cblock(range->begin);
 	uint64_t e = from_cblock(range->end);
 	uint64_t n = from_cblock(cache->cache_size);
