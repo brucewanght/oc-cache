@@ -2484,13 +2484,16 @@ static int parse_metadata_dev(struct cache_args *ca, struct dm_arg_set *as,
 			      char **error)
 {
 	int r;
+	char *meta_name;
 	sector_t metadata_dev_size;
 	char b[BDEVNAME_SIZE];
 
 	if (!at_least_one_arg(as, error))
 		return -EINVAL;
 
-	r = dm_get_device(ca->ti, dm_shift_arg(as), FMODE_READ | FMODE_WRITE,
+	meta_name = dm_shift_arg(as);
+	DMWARN("metadata device name: %s", meta_name);
+	r = dm_get_device(ca->ti, meta_name, FMODE_READ | FMODE_WRITE,
 			  &ca->metadata_dev);
 	if (r) {
 		*error = "Error opening metadata device";
