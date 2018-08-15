@@ -1400,8 +1400,15 @@ static void queue_demotion(struct smq_policy *mq)
 	}
 }
 
+
+#ifdef CONFIG_DM_MULTI_USER 
+/* put an entry into promotion queue */
+static void queue_promotion(struct smq_policy *mq, dm_oblock_t oblock, struct entry *hs_e,
+			    struct policy_work **workp)
+#else
 static void queue_promotion(struct smq_policy *mq, dm_oblock_t oblock,
 			    struct policy_work **workp)
+#endif
 {
 	int r;
 	struct entry *e;
@@ -1583,7 +1590,12 @@ static struct entry *update_hotspot_queue(struct smq_policy *mq, dm_oblock_t b)
 	} else {
 		stats_miss(&mq->hotspot_stats);
 
+#ifdef CONFIG_DM_MULTI_USER
+        /* allocate a cold block entry */
+		e = alloc_entry(&mq->hotspot_alloc, false);
+#else
 		e = alloc_entry(&mq->hotspot_alloc);
+#endif
 		if (!e) {
 			e = q_pop(&mq->hotspot);
 			if (e) {
@@ -1658,7 +1670,12 @@ static int __lookup(struct smq_policy *mq, dm_oblock_t oblock, dm_cblock_t *cblo
 
 		pr = should_promote(mq, hs_e, data_dir, fast_copy);
 		if (pr != PROMOTE_NOT) {
+#ifdef CONFIG_DM_MULTI_USER
+			/* we need to allocate entry according to level of hs_e */
+			queue_promotion(mq, oblock, hs_e, work);
+#else
 			queue_promotion(mq, oblock, work);
+#endif
 			*background_work = true;
 		}
 
@@ -1828,11 +1845,29 @@ static int smq_load_mapping(struct dm_cache_policy *p,
 	struct smq_policy *mq = to_smq_policy(p);
 	struct entry *e;
 
+#ifdef CONFIG_DM_MULTI_USER
+	/* WHT modified: allocate paticular entry with cblock and hot bit */
+	e = alloc_particular_entry(&mq->cache_alloc, from_cblock(cblock), cblock.hot);
+	e->oblock = oblock;
+	e->dirty = dirty;
+	e->level = hint_valid ? min(hint, NR_CACHE_LEVELS - 1) : random_level(cblock);
+	e->pending_work = false;
+	/* WHT added: set cache device block number for entry */
+	e->dbn = cblock.dbn;
+	/* we allocate correspondind block to entry, so we need to mark it through
+	 * seting bit to 1
+	 */
+	if (e->hot)
+		set_bit(e->dbn, mq->hot_cache_bits);
+	else
+		set_bit(e->dbn, mq->cold_cache_bits);
+#else
 	e = alloc_particular_entry(&mq->cache_alloc, from_cblock(cblock));
 	e->oblock = oblock;
 	e->dirty = dirty;
 	e->level = hint_valid ? min(hint, NR_CACHE_LEVELS - 1) : random_level(cblock);
 	e->pending_work = false;
+#endif
 
 	/*
 	 * When we load mappings we push ahead of both sentinels in order to
