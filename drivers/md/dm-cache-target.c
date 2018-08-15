@@ -1932,9 +1932,9 @@ static int map_bio(struct cache *cache, struct bio *bio, dm_oblock_t block,
 		} else {
 #ifdef CONFIG_DM_MULTI_USER
 			/* we should use logical cache block number to test dirty */
-			if (bio_data_dir(bio) == WRITE && writethrough_mode(&cache->features) &&
+			if (bio_data_dir(bio) == WRITE && writethrough_mode(cache) &&
 			    !is_dirty(cache, cblock.cbn)) {
-				remap_to_origin_then_cache(cache, bio, block, cblock);
+				remap_to_origin_and_cache(cache, bio, block, cblock);
 				accounted_begin(cache, bio);
 			} 
 #else
@@ -2175,8 +2175,16 @@ static void destroy(struct cache *cache)
 	if (cache->origin_dev)
 		dm_put_device(cache->ti, cache->origin_dev);
 
+#ifdef CONFIG_DM_MULTI_USER
+	/* release all the devices when destroying */
+	if(cache->hot_cache_dev)
+		dm_put_device(cache->ti, cache->hot_cache_dev);
+	if(cache->cold_cache_dev)
+		dm_put_device(cache->ti, cache->cold_cache_dev);
+#else
 	if (cache->cache_dev)
 		dm_put_device(cache->ti, cache->cache_dev);
+#endif
 
 	if (cache->policy)
 		dm_cache_policy_destroy(cache->policy);
@@ -2987,6 +2995,7 @@ static int cache_is_congested(struct dm_target_callbacks *cb, int bdi_bits)
 static int cache_create(struct cache_args *ca, struct cache **result)
 {
 	int r = 0;
+    int i = 0;
 	char **error = &ca->ti->error;
 	struct cache *cache;
 	struct dm_target *ti = ca->ti;
@@ -3007,12 +3016,20 @@ static int cache_create(struct cache_args *ca, struct cache **result)
 	 */
 	ti->num_flush_bios = 3;
 	ti->flush_supported = true;
+
 	ti->num_discard_bios = 1;
 	ti->discards_supported = true;
 	ti->split_discard_bios = false;
 
+	ti->per_io_data_size = sizeof(struct per_bio_data);
+
 	cache->features = ca->features;
-	ti->per_io_data_size = get_per_bio_data_size(cache);
+	if (writethrough_mode(cache)) {
+		/* Create bioset for writethrough bios issued to origin */
+		r = bioset_init(&cache->bs, BIO_POOL_SIZE, 0, 0);
+		if (r)
+			goto bad;
+	}
 
 	/* 
 	 * This callback is used to detect if the cache device or origin device 
