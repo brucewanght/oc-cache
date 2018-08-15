@@ -867,7 +867,6 @@ static void remap_to_cache(struct cache *cache, struct bio *bio,
 			   dm_cblock_t cblock)
 {
 	sector_t bi_sector = bio->bi_iter.bi_sector;
-	sector_t block = from_cblock(cblock);
 
 #ifdef CONFIG_DM_MULTI_USER 
 	sector_t block = from_cbn(cblock.dbn);
