@@ -343,11 +343,11 @@ config DM_CACHE_LRU
          A LRU cache policy.
 
 #WHT added for multi user in dm-cache
-config DM_MULTI_USER 
-       bool "Dm-cache multi user support"
-	   default n
-       ---help---
-         Add multi user support in dm-cache.
+#config DM_MULTI_USER 
+#       bool "Dm-cache multi user support"
+#	   default n
+#       ---help---
+#         Add multi user support in dm-cache.
 
 config DM_WRITECACHE
 	tristate "Writecache target"
