@@ -69,8 +69,22 @@ void dm_cache_metadata_close(struct dm_cache_metadata *cmd);
  * care about the origin, assuming the core target is giving us valid
  * origin blocks to map to.
  */
+#ifdef CONFIG_DM_MULTI_USER
+/* we use dm_cbn_t to replace dm_cblock_t for these functions*/
+int dm_cache_resize(struct dm_cache_metadata *cmd, dm_cbn_t new_cache_size);
+int dm_cache_size(struct dm_cache_metadata *cmd, dm_cbn_t *result);
+int dm_cache_remove_mapping(struct dm_cache_metadata *cmd, dm_cbn_t cblock);
+int dm_cache_insert_mapping(struct dm_cache_metadata *cmd, dm_cbn_t cblock, dm_oblock_t oblock);
+#else
 int dm_cache_resize(struct dm_cache_metadata *cmd, dm_cblock_t new_cache_size);
 int dm_cache_size(struct dm_cache_metadata *cmd, dm_cblock_t *result);
+int dm_cache_remove_mapping(struct dm_cache_metadata *cmd, dm_cblock_t cblock);
+int dm_cache_insert_mapping(struct dm_cache_metadata *cmd, dm_cblock_t cblock, dm_oblock_t oblock);
+#endif
+
+typedef int (*load_mapping_fn)(void *context, dm_oblock_t oblock,
+			       dm_cblock_t cblock, bool dirty,
+			       uint32_t hint, bool hint_valid);
 
 int dm_cache_discard_bitset_resize(struct dm_cache_metadata *cmd,
 				   sector_t discard_block_size,
@@ -83,13 +97,8 @@ int dm_cache_load_discards(struct dm_cache_metadata *cmd,
 
 int dm_cache_set_discard(struct dm_cache_metadata *cmd, dm_dblock_t dblock, bool discard);
 
-int dm_cache_remove_mapping(struct dm_cache_metadata *cmd, dm_cblock_t cblock);
-int dm_cache_insert_mapping(struct dm_cache_metadata *cmd, dm_cblock_t cblock, dm_oblock_t oblock);
 int dm_cache_changed_this_transaction(struct dm_cache_metadata *cmd);
 
-typedef int (*load_mapping_fn)(void *context, dm_oblock_t oblock,
-			       dm_cblock_t cblock, bool dirty,
-			       uint32_t hint, bool hint_valid);
 int dm_cache_load_mappings(struct dm_cache_metadata *cmd,
 			   struct dm_cache_policy *policy,
 			   load_mapping_fn fn,
