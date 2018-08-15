@@ -323,6 +323,14 @@ config DM_CACHE
          algorithms used to select which blocks are promoted, demoted,
          cleaned etc.  It supports writeback and writethrough modes.
 
+#WHT added for multi user in dm-cache
+config DM_MULTI_USER 
+       bool "Dm-cache multi user support"
+       depends on DM_CACHE
+	   default y
+       ---help---
+         Add multi user support in dm-cache.
+
 config DM_CACHE_SMQ
        tristate "Stochastic MQ Cache Policy (EXPERIMENTAL)"
        depends on DM_CACHE
@@ -334,21 +342,6 @@ config DM_CACHE_SMQ
          reads over writes.  This SMQ policy (vs MQ) offers the promise
          of less memory utilization, improved performance and increased
          adaptability in the face of changing workloads.
-
-#WHT added for LRU
-config DM_CACHE_LRU
-       tristate "LRU Cache Policy (EXPERIMENTAL)"
-       depends on DM_CACHE
-       default y
-       ---help---
-         A LRU cache policy.
-
-#WHT added for multi user in dm-cache
-config DM_MULTI_USER 
-       bool "Dm-cache multi user support"
-	   default y
-       ---help---
-         Add multi user support in dm-cache.
 
 config DM_WRITECACHE
 	tristate "Writecache target"
