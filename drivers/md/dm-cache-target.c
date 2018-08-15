@@ -443,13 +443,6 @@ struct cache {
 	struct dm_dev *cache_dev;
 #endif
 
-	/* OC-Cache: for current user */
-	uint16_t user_id;
-	uint16_t nr_users;
-	/* user offset in cache_dirty_bitset */
-	uint64_t user_dirty_off;
-	/* number of cache blocks belong to user */
-	dm_cblock_t user_cache_size;
 
 	/*
 	 * Invalidation fields.
