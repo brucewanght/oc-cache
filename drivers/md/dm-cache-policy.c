@@ -108,10 +108,19 @@ void dm_cache_policy_unregister(struct dm_cache_policy_type *type)
 }
 EXPORT_SYMBOL_GPL(dm_cache_policy_unregister);
 
+#ifdef CONFIG_DM_MULTI_USER
+/* use dm_cbn_t as size type */
+struct dm_cache_policy *dm_cache_policy_create(const char *name,
+					       dm_cbn_t hot_cache_size,
+					       dm_cbn_t cold_cache_size,
+					       sector_t origin_size,
+					       sector_t cache_block_size)
+#else
 struct dm_cache_policy *dm_cache_policy_create(const char *name,
 					       dm_cblock_t cache_size,
 					       sector_t origin_size,
 					       sector_t cache_block_size)
+#endif
 {
 	struct dm_cache_policy *p = NULL;
 	struct dm_cache_policy_type *type;
@@ -122,7 +131,13 @@ struct dm_cache_policy *dm_cache_policy_create(const char *name,
 		return ERR_PTR(-EINVAL);
 	}
 
+#ifdef CONFIG_DM_MULTI_USER
+	/* create a policy with specified hot cache size and cold cache size */
+	p = type->create(hot_cache_size, cold_cache_size, origin_size, cache_block_size);
+#else
 	p = type->create(cache_size, origin_size, cache_block_size);
+#endif
+
 	if (!p) {
 		put_policy(type);
 		return ERR_PTR(-ENOMEM);
