@@ -18,7 +18,27 @@
  */
 
 typedef dm_block_t __bitwise dm_oblock_t;
-typedef uint32_t __bitwise dm_cblock_t;
+typedef dm_block_t __bitwise dm_dblock_t;
+
+static inline dm_oblock_t to_oblock(dm_block_t b)
+{
+	return (__force dm_oblock_t) b;
+}
+
+static inline dm_block_t from_oblock(dm_oblock_t b)
+{
+	return (__force dm_block_t) b;
+}
+
+static inline dm_dblock_t to_dblock(dm_block_t b)
+{
+	return (__force dm_dblock_t) b;
+}
+
+static inline dm_block_t from_dblock(dm_dblock_t b)
+{
+	return (__force dm_block_t) b;
+}
 
 #ifdef CONFIG_DM_MULTI_USER
 /* dm_cache_block struct record the logical number of cache block 
@@ -26,6 +46,8 @@ typedef uint32_t __bitwise dm_cblock_t;
  * The cbn is cache block logical number on hot device or cold device.
  */
 typedef uint32_t __bitwise dm_cbn_t;
+
+/* this struct represent a cache logical block and its related cache device block */
 typedef struct
 {
 	dm_cbn_t cbn;   /* cache block number in policy and metadata */
@@ -43,11 +65,13 @@ static inline dm_cblock_t to_cblock(dm_cbn_t cbn, dm_cbn_t dbn, bool hot)
 	return cblock;
 }
 
+/* convert a 32 bit integer to dm_cbn_t */
 static inline dm_cbn_t to_cbn(uint32_t b)
 {
 	return (__force dm_cbn_t) b;
 }
 
+/* convert a dm_cbn_t to a 32 bit integer */
 static inline uint32_t from_cbn(dm_cbn_t b)
 {
 	return (__force uint32_t) b;
@@ -59,19 +83,7 @@ static inline dm_cbn_t from_cblock(dm_cblock_t b)
 	return (__force dm_cbn_t)(b.cbn);
 }
 #else
-typedef dm_block_t __bitwise dm_dblock_t;
-
-static inline dm_oblock_t to_oblock(dm_block_t b)
-{
-	return (__force dm_oblock_t) b;
-}
-
-static inline dm_block_t from_oblock(dm_oblock_t b)
-{
-	return (__force dm_block_t) b;
-}
-#endif
-
+typedef uint32_t __bitwise dm_cblock_t;
 static inline dm_cblock_t to_cblock(uint32_t b)
 {
 	return (__force dm_cblock_t) b;
@@ -81,15 +93,6 @@ static inline uint32_t from_cblock(dm_cblock_t b)
 {
 	return (__force uint32_t) b;
 }
-
-static inline dm_dblock_t to_dblock(dm_block_t b)
-{
-	return (__force dm_dblock_t) b;
-}
-
-static inline dm_block_t from_dblock(dm_dblock_t b)
-{
-	return (__force dm_block_t) b;
-}
+#endif  /* CONFIG_DM_MULTI_USER */
 
 #endif /* DM_CACHE_BLOCK_TYPES_H */
