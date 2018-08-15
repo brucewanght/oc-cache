@@ -586,7 +586,12 @@ static void read_superblock_fields(struct dm_cache_metadata *cmd,
 	cmd->discard_block_size = le64_to_cpu(disk_super->discard_block_size);
 	cmd->discard_nr_blocks = to_dblock(le64_to_cpu(disk_super->discard_nr_blocks));
 	cmd->data_block_size = le32_to_cpu(disk_super->data_block_size);
+#ifdef CONFIG_DM_MULTI_USER
+	/* WHT modified: use dm_cbn_t to represent size */
+	cmd->cache_blocks = to_cbn(le32_to_cpu(disk_super->cache_blocks));
+#else
 	cmd->cache_blocks = to_cblock(le32_to_cpu(disk_super->cache_blocks));
+#endif
 	strncpy(cmd->policy_name, disk_super->policy_name, sizeof(cmd->policy_name));
 	cmd->policy_version[0] = le32_to_cpu(disk_super->policy_version[0]);
 	cmd->policy_version[1] = le32_to_cpu(disk_super->policy_version[1]);
