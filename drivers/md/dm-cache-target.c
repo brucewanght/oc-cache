@@ -1542,11 +1542,19 @@ static void mg_full_copy(struct work_struct *ws)
 	struct policy_work *op = mg->op;
 	bool is_policy_promote = (op->op == POLICY_PROMOTE);
 
+#ifdef CONFIG_DM_MULTI_USER
+	if ((!is_policy_promote && !is_dirty(cache, op->cblock.cbn)) ||
+	    is_discarded_oblock(cache, op->oblock)) {
+		mg_upgrade_lock(ws);
+		return;
+	}
+#else
 	if ((!is_policy_promote && !is_dirty(cache, op->cblock)) ||
 	    is_discarded_oblock(cache, op->oblock)) {
 		mg_upgrade_lock(ws);
 		return;
 	}
+#endif
 
 	init_continuation(&mg->k, mg_upgrade_lock);
 
