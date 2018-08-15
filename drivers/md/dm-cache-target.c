@@ -2488,6 +2488,8 @@ static int parse_metadata_dev(struct cache_args *ca, struct dm_arg_set *as,
 	sector_t metadata_dev_size;
 	char b[BDEVNAME_SIZE];
 
+	DMWARN("in parse_metadata_dev before parse");
+
 	if (!at_least_one_arg(as, error))
 		return -EINVAL;
 
@@ -2729,6 +2731,8 @@ static int parse_cache_args(struct cache_args *ca, int argc, char **argv,
 	r = parse_cold_cache_id(ca, &as, error);
 	if (r)
 		return r;
+
+	DMWARN("in parse_cache_args, before parse_metadata_dev");
 
 	r = parse_metadata_dev(ca, &as, error);
 	if (r)
