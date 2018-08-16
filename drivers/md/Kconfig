@@ -326,7 +326,6 @@ config DM_CACHE
 #WHT added for multi user in dm-cache
 config DM_MULTI_USER 
        bool "Dm-cache multi user support"
-       depends on DM_CACHE
 	   default y
        ---help---
          Add multi user support in dm-cache.

@@ -3337,6 +3337,7 @@ static int cache_ctr(struct dm_target *ti, unsigned argc, char **argv)
 	}
 	ca->ti = ti;
 
+	DMWARN("in cache_ctr: before parse_cache_args");
 	r = parse_cache_args(ca, argc, argv, &ti->error);
 	if (r)
 		goto out;
