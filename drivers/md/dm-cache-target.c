@@ -2484,18 +2484,13 @@ static int parse_metadata_dev(struct cache_args *ca, struct dm_arg_set *as,
 			      char **error)
 {
 	int r;
-	char *meta_name;
 	sector_t metadata_dev_size;
 	char b[BDEVNAME_SIZE];
-
-	DMWARN("in parse_metadata_dev before parse");
 
 	if (!at_least_one_arg(as, error))
 		return -EINVAL;
 
-	meta_name = dm_shift_arg(as);
-	DMWARN("metadata device name: %s", meta_name);
-	r = dm_get_device(ca->ti, meta_name, FMODE_READ | FMODE_WRITE,
+	r = dm_get_device(ca->ti, dm_shift_arg(as), FMODE_READ | FMODE_WRITE,
 			  &ca->metadata_dev);
 	if (r) {
 		*error = "Error opening metadata device";
@@ -2732,8 +2727,6 @@ static int parse_cache_args(struct cache_args *ca, int argc, char **argv,
 	if (r)
 		return r;
 
-	DMWARN("OC-Cache: in parse_cache_args, before parse_metadata_dev");
-
 	r = parse_metadata_dev(ca, &as, error);
 	if (r)
 		return r;
@@ -2770,7 +2763,6 @@ static int parse_cache_args(struct cache_args *ca, int argc, char **argv,
 	if (r)
 		return r;
 #else
-	DMWARN("not OC-Cache: in parse_cache_args, before parse_metadata_dev");
 	r = parse_metadata_dev(ca, &as, error);
 	if (r)
 		return r;
@@ -3337,7 +3329,6 @@ static int cache_ctr(struct dm_target *ti, unsigned argc, char **argv)
 	}
 	ca->ti = ti;
 
-	DMWARN("in cache_ctr: before parse_cache_args");
 	r = parse_cache_args(ca, argc, argv, &ti->error);
 	if (r)
 		goto out;
