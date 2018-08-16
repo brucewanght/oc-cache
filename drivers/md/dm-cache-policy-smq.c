@@ -510,12 +510,6 @@ static void q_requeue(struct queue *q, struct entry *e, unsigned extra_levels,
 	q_del(q, e);
 	e->level = new_level;
 	q_push(q, e);
-
-#ifdef CONFIG_DM_MULTI_USER 
-/* check if this entry's level is higher than hot level */
-    if ((e->hot == false)&&(e->level >= mq->hot_level))
-        mq->hot_shared_cbk ++；
-#endif
 }
 
 /*----------------------------------------------------------------*/
@@ -1139,12 +1133,22 @@ static void requeue(struct smq_policy *mq, struct entry *e)
 	if (!test_and_set_bit(from_cblock(infer_cblock(mq, e)), mq->cache_hit_bits)) {
 		if (!e->dirty) {
 			q_requeue(&mq->clean, e, 1u, NULL, NULL);
+#ifdef CONFIG_DM_MULTI_USER 
+            /* check if this entry's level is higher than hot level */
+            if ((e->hot == false)&&(e->level >= mq->hot_level))
+                mq->hot_shared_cbk ++;
+#endif
 			return;
 		}
 
 		q_requeue(&mq->dirty, e, 1u,
 			  get_sentinel(&mq->writeback_sentinel_alloc, e->level, !mq->current_writeback_sentinels),
 			  get_sentinel(&mq->writeback_sentinel_alloc, e->level, mq->current_writeback_sentinels));
+#ifdef CONFIG_DM_MULTI_USER 
+        /* check if this entry's level is higher than hot level */
+        if ((e->hot == false)&&(e->level >= mq->hot_level))
+            mq->hot_shared_cbk ++;
+#endif
 	}
 }
 
