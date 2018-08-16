@@ -2732,7 +2732,7 @@ static int parse_cache_args(struct cache_args *ca, int argc, char **argv,
 	if (r)
 		return r;
 
-	DMWARN("in parse_cache_args, before parse_metadata_dev");
+	DMWARN("OC-Cache: in parse_cache_args, before parse_metadata_dev");
 
 	r = parse_metadata_dev(ca, &as, error);
 	if (r)
@@ -2770,6 +2770,7 @@ static int parse_cache_args(struct cache_args *ca, int argc, char **argv,
 	if (r)
 		return r;
 #else
+	DMWARN("not OC-Cache: in parse_cache_args, before parse_metadata_dev");
 	r = parse_metadata_dev(ca, &as, error);
 	if (r)
 		return r;
