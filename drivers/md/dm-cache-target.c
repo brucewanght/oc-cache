@@ -327,7 +327,7 @@ static void dm_unhook_bio(struct dm_hook_info *h, struct bio *bio)
 
 enum cache_metadata_mode {
 	CM_WRITE,		/* metadata may be changed */
-	CM_READ_ONLY,		/* metadata may not be changed */
+	CM_READ_ONLY,	/* metadata may not be changed */
 	CM_FAIL
 };
 
@@ -414,12 +414,11 @@ struct cache {
 	dm_cbn_t dev_size[NUM_CHANNELS];   /* sizes of cache devices */
 
 	/*
-	 * We use 2 cache devices to accomodate cache.
-	 * One is hot cache device for hot cache data, and another is cold cache device
-	 * for cold cache data.
+	 * We use 2 cache devices to accomodate cache. One is hot cache device 
+	 * for hot cache data, and another is cold cache device for cold cache data.
 	 */
-	struct dm_dev *hot_cache_dev;      /* hot cache device */
-	struct dm_dev *cold_cache_dev;     /* cold cache device */
+	struct dm_dev *hot_cache_dev;   /* hot cache device */
+	struct dm_dev *cold_cache_dev;  /* cold cache device */
 
 	dm_cbn_t cold_cache_off;        /* user cache offset on cold cache device */
 	dm_cbn_t cold_cache_size;       /* user cache size on cold cache device */
@@ -438,7 +437,7 @@ struct cache {
 	dm_cblock_t cache_size;
 
 	/*
-	 * The faster of the two data devices.  Typically an SSD.
+	 * The faster of the two data devices. Typically an SSD.
 	 */
 	struct dm_dev *cache_dev;
 #endif
@@ -863,6 +862,7 @@ static void remap_to_cache(struct cache *cache, struct bio *bio,
 
 #ifdef CONFIG_DM_MULTI_USER 
 	sector_t block = from_cbn(cblock.dbn);
+	DMWARN("DEBUG: in remap_to_cache, dbn = %lu", block);
 	/* 
 	 * we need remap to hot or cold cache according information from policy, i.e., cblock.
 	 */
@@ -930,6 +930,7 @@ static void remap_to_origin_clear_discard(struct cache *cache, struct bio *bio,
 static void remap_to_cache_dirty(struct cache *cache, struct bio *bio,
 				 dm_oblock_t oblock, dm_cblock_t cblock)
 {
+	DMWARN("DEBUG: in remap_to_cache_dirty");
 	check_if_tick_bio_needed(cache, bio);
 	remap_to_cache(cache, bio, cblock);
 	if (bio_data_dir(bio) == WRITE) {
@@ -1543,6 +1544,7 @@ static void mg_full_copy(struct work_struct *ws)
 	bool is_policy_promote = (op->op == POLICY_PROMOTE);
 
 #ifdef CONFIG_DM_MULTI_USER
+	/* use cbn to replace cblock*/
 	if ((!is_policy_promote && !is_dirty(cache, op->cblock.cbn)) ||
 	    is_discarded_oblock(cache, op->oblock)) {
 		mg_upgrade_lock(ws);
@@ -1931,6 +1933,7 @@ static int map_bio(struct cache *cache, struct bio *bio, dm_oblock_t block,
 				remap_to_origin_clear_discard(cache, bio, block);
 		} else {
 #ifdef CONFIG_DM_MULTI_USER
+			DMWARN("DEBUG: in map_bio hit");
 			/* we should use logical cache block number to test dirty */
 			if (bio_data_dir(bio) == WRITE && writethrough_mode(cache) &&
 			    !is_dirty(cache, cblock.cbn)) {
