@@ -1437,7 +1437,10 @@ static void mg_update_metadata(struct work_struct *ws)
 	case POLICY_PROMOTE:
 #ifdef CONFIG_DM_MULTI_USER 
 		/* we need to use logical cache block number here */
+		DMWARN("DEBUG: mg_update_metadata, demote before dm_cache_insert_mapping, cbn=%lu, oblock=%lu", 
+				op->cblock.cbn, op->oblock);
 		r = dm_cache_insert_mapping(cache->cmd, op->cblock.cbn, op->oblock);
+		DMWARN("DEBUG: mg_update_metadata, demote after dm_cache_insert_mapping");
 #else
 		r = dm_cache_insert_mapping(cache->cmd, op->cblock, op->oblock);
 #endif
@@ -1455,7 +1458,10 @@ static void mg_update_metadata(struct work_struct *ws)
 	case POLICY_DEMOTE:
 #ifdef CONFIG_DM_MULTI_USER 
 		/* we need to use logical cache block number here */
+		DMWARN("DEBUG: mg_update_metadata, promote before dm_cache_insert_mapping, cbn=%lu, oblock=%lu", 
+				op->cblock.cbn, op->oblock);
 		r = dm_cache_remove_mapping(cache->cmd, op->cblock.cbn);
+		DMWARN("DEBUG: mg_update_metadata, promote after dm_cache_insert_mapping");
 #else
 		r = dm_cache_remove_mapping(cache->cmd, op->cblock);
 #endif
