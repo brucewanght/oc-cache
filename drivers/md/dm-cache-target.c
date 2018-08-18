@@ -872,6 +872,7 @@ static void remap_to_cache(struct cache *cache, struct bio *bio,
 		 * device range according the offeset */
 		bio_set_dev(bio, cache->hot_cache_dev->bdev);
 		block = block + cache->hot_cache_off;
+		DMWARN("DEBUG: in remap_to_cache, dbn = %lu, set hot dev", block);
 	}
 	else 
 	{
@@ -879,6 +880,7 @@ static void remap_to_cache(struct cache *cache, struct bio *bio,
 		 * device range according the offeset */
 		bio_set_dev(bio, cache->cold_cache_dev->bdev);
 		block = block + cache->cold_cache_off;
+		DMWARN("DEBUG: in remap_to_cache, dbn = %lu, set cold dev", block);
 	}
 #else
 	sector_t block = from_cblock(cblock);
@@ -933,6 +935,7 @@ static void remap_to_cache_dirty(struct cache *cache, struct bio *bio,
 	DMWARN("DEBUG: in remap_to_cache_dirty");
 	check_if_tick_bio_needed(cache, bio);
 	remap_to_cache(cache, bio, cblock);
+	DMWARN("DEBUG: after  remap_to_cache");
 	if (bio_data_dir(bio) == WRITE) {
 		set_dirty(cache, cblock);
 		clear_discard(cache, oblock_to_dblock(cache, oblock));
